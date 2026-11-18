@@ -16,7 +16,10 @@ def read_posts(feed_url):
             raise ValueError("Feed exceeds size limit")
     else:
         raw = Path(__file__).with_name("sample.json").read_bytes()
-    posts = json.loads(raw)
+    return validate(json.loads(raw))
+
+
+def validate(posts):
     if not isinstance(posts, list):
         raise ValueError("Expected a list of posts")
     for post in posts:
@@ -26,4 +29,4 @@ def read_posts(feed_url):
         if urlsplit(post["url"]).scheme != "https":
             raise ValueError("Invalid post URL")
         date.fromisoformat(post["published"])
-    return posts
+    return [{field: post[field] for field in ("url", "published", "title", "text")} for post in posts]

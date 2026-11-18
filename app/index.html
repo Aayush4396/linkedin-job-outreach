@@ -1,43 +1,38 @@
 <!doctype html>
-<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>HireMate · Hiring posts</title>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HireMate · Outreach</title>
 <style>
-*{box-sizing:border-box}body{background:#f5f7fc;color:#182038;font:16px/1.55 system-ui;margin:0}main{max-width:720px;margin:auto;padding:32px 20px}header{display:flex;align-items:center;justify-content:space-between;gap:12px}small{color:#5141a0}h1{font-size:2rem;margin:.2em 0}button{background:#413297;color:white;border:0;border-radius:8px;padding:12px;cursor:pointer}article{background:white;border:1px solid #dce0eb;border-radius:12px;padding:20px;margin:12px 0}h2{font-size:1.1rem;margin:.4em 0}a{color:#473391}p{overflow-wrap:anywhere}
-</style>
-<main><header><div><small>HireMate</small><h1>Hiring posts</h1></div><button id="scan">Check for posts</button></header>
-<p id="source"></p><p id="notice" role="status"></p><section id="list"></section></main>
-<script>
-const el = id => document.getElementById(id);
-async function refresh() {
-  const response = await fetch('/api/posts');
-  if (!response.ok) throw Error();
-  const data = await response.json();
-  el('source').textContent = data.source + ' · Email sending is off';
-  el('list').replaceChildren();
-  for (const post of data.posts) {
-    const card = document.createElement('article');
-    for (const [tag, value] of [['small',post.status],['h2',post.title],['p',post.body],['small',post.published]]) {
-      const node = document.createElement(tag);
-      node.textContent = value;
-      card.append(node);
-    }
-    if (data.source !== 'Sample posts') {
-      const link = document.createElement('a');
-      link.href = post.url; link.textContent = 'Open original post';
-      card.append(document.createElement('br'),link);
-    }
-    el('list').append(card);
-  }
-}
-el('scan').onclick = async () => {
-  el('scan').disabled = true;
-  try {
-    const r = await fetch('/api/scan',{method:'POST'});
-    if (!r.ok) throw Error();
-    el('notice').textContent = 'New posts found: ' + (await r.json()).new;
-    await refresh();
-  } catch { el('notice').textContent = 'Could not check for posts. Try again.'; }
-  finally { el('scan').disabled = false; }
-};
-refresh().catch(() => el('notice').textContent = 'Could not load posts.');
-</script></html>
+*{box-sizing:border-box}body{margin:0;background:#f5f6fa;color:#1d2537;font:16px/1.55 system-ui}main{max-width:760px;margin:auto;padding:28px 18px}header,.actions{display:flex;align-items:center;justify-content:space-between;gap:.6rem;flex-wrap:wrap}h1,h2,p{margin:.4em 0}h1{letter-spacing:-.045em}h2{font-size:1.18rem}article,details{background:white;border:1px solid #dadfea;border-radius:14px;padding:18px;margin:12px 0}button{border:0;color:#fff;background:#423499;padding:10px 15px;border-radius:9px;cursor:pointer;font:inherit}button:disabled{opacity:.6}small,summary{color:#51419a}summary{cursor:pointer}label{display:block;margin-top:12px;font-weight:600}input,textarea{display:block;width:100%;font:inherit;padding:9px;border-radius:6px;border:1px solid #bcc1d0}textarea{min-height:9em}.actions{justify-content:flex-start;margin-top:10px}.actions button+button{background:#eae9f6;color:#30295c}pre,p{white-space:pre-wrap;overflow-wrap:anywhere}pre{max-height:14rem;overflow:auto}a{color:#443294}
+</style></head><body><main><small>HireMate</small><header><h1>Your outreach</h1><button id="scan">Check for posts</button></header>
+<p id="mode"></p><p id="counts"></p><details id="connection" hidden><summary id="connectionState">LinkedIn connection</summary><label for="token">New session token</label><input id="token" type="password" autocomplete="off"><button id="rotate">Refresh connection</button></details><label><input style="width:auto;display:inline" type="checkbox" id="approval"> Review new drafts before sending</label><details><summary id="resume">My résumé</summary><pre id="preview"></pre>
+<label for="file">Choose a Word, text, or PDF file</label><input id="file" type="file" accept=".doc,.docx,.txt,.pdf"><button id="upload">Use this résumé</button></details>
+<p role="status" id="notice"></p><section id="list"></section></main><script>
+const el=id=>document.getElementById(id);
+function add(parent,tag,text){const node=document.createElement(tag);node.textContent=text;parent.append(node);return node}
+async function api(path,options={}){const r=await fetch(path,options);if(!r.ok){let msg='Please try again.';try{const d=await r.json();if(typeof d.detail==='string')msg=d.detail}catch{}throw Error(msg)}return r.json()}
+function bind(button,action){button.onclick=async()=>{button.disabled=true;try{const message=await action();await refresh();el('notice').textContent=message}catch(e){el('notice').textContent=e.message}finally{button.disabled=false}}}
+const headers={'X-HireMate':'1'};
+async function refresh(){const data=await api('/api/posts');
+el('mode').textContent=data.source+' · '+(data.dry?'Practice mode':'Live delivery')+' · '+(data.approval?'Approval required':'Automatic sending');
+el('connection').hidden=!data.rotate;el('connectionState').textContent='LinkedIn · '+data.connection;
+el('counts').textContent=data.posts.length+' posts checked · '+data.posts.filter(p=>p.status==='Ready for review').length+' ready to review · '+data.sent_today+' sent today';
+el('approval').checked=data.approval;
+el('resume').textContent=data.resume?'My résumé · '+data.resume.name:'Add your résumé';
+el('preview').textContent=data.resume?.text||'';el('list').replaceChildren();
+for(const p of data.posts){const c=add(el('list'),'article','');add(c,'small',p.status+' · '+p.published);add(c,'h2',p.title);add(c,'p',p.text);
+if(!p.sample){const a=add(c,'a','Original post');a.href=p.url}
+if(!p.message)continue;
+add(c,'p','To: '+p.recipient+' · Attachment: '+p.filename);
+if(p.status!=='Ready for review'){add(c,'p',p.subject);continue}
+const subject=add(add(c,'label','Subject'),'input','');subject.value=p.subject;
+const body=add(add(c,'label','Email'),'textarea','');body.value=p.message;
+const actions=add(c,'div','');actions.className='actions';
+for(const [action,label] of [['approve','Approve and queue'],['save','Save edits'],['skip','Skip']]){
+bind(add(actions,'button',label),async()=>{await api('/api/posts/'+p.id,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({subject:subject.value,message:body.value,action})});return 'Draft updated.'})}
+}}
+el('approval').onchange=async()=>{try{await api('/api/preferences/approval',{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({required:el('approval').checked})})}catch(e){el('notice').textContent=e.message}await refresh()};
+bind(el('scan'),async()=>{const d=await api('/api/scan',{method:'POST',headers});return 'New posts found: '+d.new});
+bind(el('rotate'),async()=>{await api('/api/connection',{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({cookie:el('token').value})});el('token').value='';return 'Connection updated.'});
+bind(el('upload'),async()=>{const file=el('file').files[0];if(!file)throw Error('Choose a résumé first.');await api('/api/resume',{method:'POST',headers:{...headers,'X-Filename':encodeURIComponent(file.name)},body:file});return 'Résumé saved.'});
+refresh().catch(e=>el('notice').textContent=e.message);
+</script></body></html>

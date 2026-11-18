@@ -1,12 +1,47 @@
-# HireMate local discovery preview
+# HireMate
 
-From this directory with Python 3.11 or later:
+HireMate discovers AI hiring posts from a configured HTTPS JSON feed, extracts explicit email addresses, and prepares résumé-based email drafts. The phone dashboard lets you upload your résumé, inspect the extracted text, edit a draft, and approve or skip it. Drafts retain their original attachment even if you later replace your résumé.
 
+## Try it locally
+
+Use Python 3.11 or newer. Run these commands from the repository root:
+
+    python -m venv .venv
+    .venv\Scripts\activate
     python -m pip install -r requirements.txt
     python -m uvicorn app.main:app
 
-Open http://127.0.0.1:8000. Keep the service on loopback for this unauthenticated preview. It checks three sample posts on startup and repeats every eight hours while running. SQLite persists the results across restarts. Use “Check for posts” to run another scan immediately.
+Open http://127.0.0.1:8000. The initial sample scan runs at startup. Upload a résumé, review the sample application, approve it, and reload after 30 seconds to see “Simulated”. With no Vertex model configured, the preview uses a generic template. Sample posts and practice-mode drafts always simulate delivery. Local settings are process environment variables. See .env.example. Store the SQLite database and data/resumes together. The local scheduler runs only while the process is open.
 
-To connect an authorized JSON feed, set POST_FEED_URL in the process environment to its HTTPS endpoint. The expected list of objects is illustrated in app/sample.json. Use a different DATABASE_PATH for real data. The adapter expects the upstream provider to return hiring posts. Provider authentication, pagination and live LinkedIn access require selecting a provider.
+TXT, DOCX, and text-based PDF parsing use Python libraries. Legacy DOC conversion uses LibreOffice. Image-only PDF pages use Poppler and English Tesseract OCR. The supplied Docker image installs all three system tools. For the same environment locally:
 
-The local matcher uses keywords and identifies explicit email addresses. Review candidates before any outreach. This milestone has no sending code. Résumé upload, Vertex AI drafting, approved delivery, authentication and Cloud Run deployment are future milestones.
+    docker build -t hiremate .
+    docker run --rm -p 127.0.0.1:8000:8080 -v hiremate-preview:/srv/data -e DATABASE_PATH=/srv/data/hiremate.sqlite3 hiremate
+
+## Connect real hiring posts and drafting
+
+Set POST_FEED_URL to a feed you are authorized to access. The endpoint must return a JSON array of objects with url (HTTPS permalink), published (YYYY-MM-DD), title, and text (full hiring post). app/sample.json shows the contract. The service polls this URL automatically. You must supply a provider that supports LinkedIn hiring posts or adapt app/sources.py to its documented API. LinkedIn account credentials alone do not provide this feed.
+
+If you have authorization from LinkedIn to automate a search, the optional Playwright connector reads visible hiring posts from the search results. Set LINKEDIN_LI_AT_COOKIE and LINKEDIN_QUERY with POST_FEED_URL empty (for Cloud Shell use POST_SOURCE=linkedin). The script stores the cookie in Secret Manager. A checkpoint or changed page layout can stop collection. The date shown for browser search results is the observation date. Refresh an expired connection from the cloud dashboard. The worker reads the latest Secret Manager version at scan time. For this connector outside Docker, install the matching browser with python -m playwright install chromium.
+
+Set GCP_PROJECT, GCP_REGION, and GEMINI_MODEL for Vertex AI drafting. Choose a model available in your project and location. Locally, configure application default credentials. The cloud deployment uses its runtime service account. RESUME_BUCKET selects Cloud Storage and Firestore in place of local storage.
+
+## Cloud Run
+
+Run deploy.sh in Google Cloud Shell from a billing-enabled project. The deploying identity needs permission to enable services, build from source, create the listed resources and IAM bindings, deploy public and private services, and act as the runtime and scheduler accounts. Configure Cloud Build source-deployment permissions for the project's build account. Choose a Firestore-compatible region before the first deploy.
+
+    export GCP_PROJECT=your-project-id
+    export GCP_REGION=us-central1
+    export GEMINI_MODEL=your-enabled-model-id
+    bash deploy.sh
+
+On first use the script prompts for the feed URL and dashboard password. Use a strong random DASHBOARD_PIN. Sign in over HTTPS with username hiremate. Cloud Scheduler invokes a separate IAM-private worker for scans at 09:00, 13:00 and 17:00 on weekdays and for one worker check per minute. Each scheduled scan starts after a randomized 5–35 minute delay. Upload your résumé from the dashboard. Keep initial deployments in practice mode. Use Secret Manager to rotate credentials and redeploy.
+
+To enable real mail after testing, redeploy with DRY_RUN=false and supply GMAIL_ADDRESS and GMAIL_APP_PASSWORD for an eligible Gmail account. Newly created live drafts require approval by default. APPROVAL_MODE=false queues new drafts automatically. The sender reserves capacity transactionally, capped at 20 per configured local day, with a randomized 2–6 minute minimum interval between claims. Scheduler cadence may increase that interval. Simulations consume a slot too. “Check delivery” means a live send was claimed but delivery was not confirmed. Check Gmail Sent before taking further action. The worker never automatically retries an uncertain send.
+
+## Verification
+
+    python -m compileall app
+    python -m unittest discover -s tests
+
+The tests use temporary local data and mock external delivery. Production validation requires an authorized live feed, an enabled Vertex model, a Google Cloud project and an eligible sender mailbox.
