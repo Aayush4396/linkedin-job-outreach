@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HireMate · Hiring posts</title>
+<style>
+*{box-sizing:border-box}body{background:#f5f7fc;color:#182038;font:16px/1.55 system-ui;margin:0}main{max-width:720px;margin:auto;padding:32px 20px}header{display:flex;align-items:center;justify-content:space-between;gap:12px}small{color:#5141a0}h1{font-size:2rem;margin:.2em 0}button{background:#413297;color:white;border:0;border-radius:8px;padding:12px;cursor:pointer}article{background:white;border:1px solid #dce0eb;border-radius:12px;padding:20px;margin:12px 0}h2{font-size:1.1rem;margin:.4em 0}a{color:#473391}p{overflow-wrap:anywhere}
+</style>
+<main><header><div><small>HireMate</small><h1>Hiring posts</h1></div><button id="scan">Check for posts</button></header>
+<p id="source"></p><p id="notice" role="status"></p><section id="list"></section></main>
+<script>
+const el = id => document.getElementById(id);
+async function refresh() {
+  const response = await fetch('/api/posts');
+  if (!response.ok) throw Error();
+  const data = await response.json();
+  el('source').textContent = data.source + ' · Email sending is off';
+  el('list').replaceChildren();
+  for (const post of data.posts) {
+    const card = document.createElement('article');
+    for (const [tag, value] of [['small',post.status],['h2',post.title],['p',post.body],['small',post.published]]) {
+      const node = document.createElement(tag);
+      node.textContent = value;
+      card.append(node);
+    }
+    if (data.source !== 'Sample posts') {
+      const link = document.createElement('a');
+      link.href = post.url; link.textContent = 'Open original post';
+      card.append(document.createElement('br'),link);
+    }
+    el('list').append(card);
+  }
+}
+el('scan').onclick = async () => {
+  el('scan').disabled = true;
+  try {
+    const r = await fetch('/api/scan',{method:'POST'});
+    if (!r.ok) throw Error();
+    el('notice').textContent = 'New posts found: ' + (await r.json()).new;
+    await refresh();
+  } catch { el('notice').textContent = 'Could not check for posts. Try again.'; }
+  finally { el('scan').disabled = false; }
+};
+refresh().catch(() => el('notice').textContent = 'Could not load posts.');
+</script></html>
