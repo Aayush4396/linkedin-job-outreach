@@ -50,6 +50,31 @@ class OutreachTests(unittest.TestCase):
             self.assertEqual(client.post("/api/scan", headers=headers).json()["new"], 0)
             self.assertEqual(len(all_posts()), 3)
 
+    def test_saved_search_browser_to_draft(self):
+        from datetime import date
+        prefs = dict(roles="GenAI", locations="India", workplace="Remote", employment="Contract")
+        recruiter = dict(url="https://www.linkedin.com/feed/update/urn:li:activity:7527956605288652801/",
+                         title="Hiring GenAI Engineer", text="Remote contract in India. Send your resume to: jobs@example.org",
+                         date_kind="published", published=date.today().isoformat(), content_kind="full")
+        seeker = dict(recruiter, url=recruiter["url"].replace("801/", "802/"),
+                      text="Seeking remote GenAI contract roles in India. My email: me@example.org")
+        onsite = dict(recruiter, url=recruiter["url"].replace("801/", "803/"), text="Onsite only. Contract in Irvine.")
+        headers = {"x-hiremate":"1"}
+        with TestClient(app) as client:
+            response = client.post("/api/preferences/search", headers=headers, json=prefs)
+            self.assertIn("GenAI", response.json()["url"])
+            self.assertEqual(client.get("/api/posts").json()["search"], prefs)
+            client.post("/api/resume",headers=dict(headers, **{"x-filename":"resume.txt"}),content=b"Evaluated RAG pipelines.")
+            for expected in (2, 0):
+                result = client.post("/api/browser-results",headers=headers,json=[recruiter,seeker,onsite])
+                self.assertEqual(result.json(), {"new":expected, "checked":3})
+            rows = client.get("/api/posts").json()["posts"]
+            drafts = [p for p in rows if p["status"] == "Ready for review"]
+            self.assertEqual(len(drafts), 1)
+            self.assertEqual((drafts[0]["recipient"], drafts[0]["filename"]), ("jobs@example.org","resume.txt"))
+            with patch.object(cfg,"DRY",False):
+                self.assertEqual(client.post("/api/browser-results",headers=headers,json=[recruiter]).status_code,403)
+
     def test_scheduled_worker_scan(self):
         with patch.object(cfg, "WORKER", True), TestClient(app) as worker:
             self.assertEqual(worker.get("/").status_code, 404)

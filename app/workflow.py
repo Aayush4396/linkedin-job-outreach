@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field
 
 from . import settings as cfg
 from .resumes import attachment
-from .post_discovery import instructions, linkedin_id
+from .post_discovery import instructions, is_linkedin_url, linkedin_id
+from .search import saved_search
 from .sources import read_posts
 from .storage import all_posts, read, transact
 from .store import EMAIL, ROLE
@@ -31,6 +32,8 @@ def capture(post, sample):
     route, apply_link = None, ""
     if post_id and not sample:
         route, recipient, apply_link = instructions(post)
+    elif not sample and is_linkedin_url(post["url"]):
+        route, recipient = "Unverified lead", ""
 
     def insert(get, put):
         index = get("linkedin_ids", post_id) if post_id else None
@@ -91,6 +94,7 @@ def draft(post, resume):
 
 
 def collect():
+    search = saved_search()
     if cfg.LINKEDIN_COOKIE and not cfg.FEED:
         from .linkedin import collect_posts, current_cookie
         cookie = current_cookie()
@@ -99,14 +103,18 @@ def collect():
         if health.get("expired") == fingerprint:
             raise ValueError("Refresh the LinkedIn connection")
         try:
-            posts = collect_posts(cookie, cfg.LINKEDIN_QUERY)
+            posts = collect_posts(cookie, search.query())
         except PermissionError:
             transact(lambda get, put: put("settings", "linkedin", {"expired":fingerprint}))
             raise
         transact(lambda get, put: put("settings", "linkedin", {"connected":True}))
     else:
         posts = read_posts(cfg.FEED)
-    count = sum(capture(post, not (cfg.FEED or cfg.LINKEDIN_COOKIE)) for post in posts)
+    return collect_results(posts, search, not (cfg.FEED or cfg.LINKEDIN_COOKIE))
+
+
+def collect_results(posts, search, sample=False):
+    count = sum(capture(post, sample) for post in posts if search.matches(post))
     prepare()
     return count
 

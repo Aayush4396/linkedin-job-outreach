@@ -18,6 +18,13 @@ class DiscoveryTests(unittest.TestCase):
         self.assertTrue(pilot(source))
         self.assertEqual(source.call_count, 2)
 
+    def test_signed_in_search_result_shapes(self):
+        group = dict(self.post, url="https://www.linkedin.com/groups/123/?highlightedUpdateUrn=urn%3Ali%3Aactivity%3A7527956605288652800")
+        source = Mock(side_effect=[[group], [self.post]])
+        self.assertTrue(pilot(source))
+        seeker = dict(group, text="I am looking for AI engineer roles. Email: me@example.org #hiring")
+        self.assertFalse(pilot(lambda: [seeker]))
+
     def test_application_evidence(self):
         self.assertEqual(instructions(self.post)[:2], ("Needs draft", "hiring@example.org"))
         self.assertEqual(instructions(dict(self.post,text="Register here: https://example.org/jobs/123"))[2],

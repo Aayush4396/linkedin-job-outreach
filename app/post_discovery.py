@@ -1,14 +1,26 @@
 """Identify individual posts and route their published application instructions."""
 import re
 from datetime import date
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from .store import EMAIL
 
 
+def is_linkedin_url(url):
+    host = urlsplit(url).hostname or ""
+    return host == "linkedin.com" or host.endswith(".linkedin.com")
+
+
 def linkedin_id(url):
     page = urlsplit(url)
-    if page.scheme != "https" or not (page.hostname == "linkedin.com" or (page.hostname or "").endswith(".linkedin.com")):
+    if page.scheme != "https" or not is_linkedin_url(url):
+        return None
+    if re.fullmatch(r"/groups/[0-9]+/?", page.path):
+        urns = parse_qs(page.query).get("highlightedUpdateUrn", [])
+        if len(urns) == 1:
+            group_post = re.fullmatch(r"urn:li:activity:([0-9]{15,21})", urns[0])
+            if group_post:
+                return group_post[1]
         return None
     match = re.fullmatch(r"/(?:posts/[^/]*-(\d{15,21})(?:-[^/]*)?|feed/update/urn:li:(?:share|activity|ugcPost):(\d{15,21}))/?", page.path)
     return next((part for part in match.groups() if part), None) if match else None

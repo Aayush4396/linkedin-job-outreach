@@ -2,8 +2,15 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HireMate · Outreach</title>
 <style>
-*{box-sizing:border-box}body{margin:0;background:#f5f6fa;color:#1d2537;font:16px/1.55 system-ui}main{max-width:760px;margin:auto;padding:28px 18px}header,.actions{display:flex;align-items:center;justify-content:space-between;gap:.6rem;flex-wrap:wrap}h1,h2,p{margin:.4em 0}h1{letter-spacing:-.045em}h2{font-size:1.18rem}article,details{background:white;border:1px solid #dadfea;border-radius:14px;padding:18px;margin:12px 0}button{border:0;color:#fff;background:#423499;padding:10px 15px;border-radius:9px;cursor:pointer;font:inherit}button:disabled{opacity:.6}small,summary{color:#51419a}summary{cursor:pointer}label{display:block;margin-top:12px;font-weight:600}input,textarea{display:block;width:100%;font:inherit;padding:9px;border-radius:6px;border:1px solid #bcc1d0}textarea{min-height:9em}.actions{justify-content:flex-start;margin-top:10px}.actions button+button{background:#eae9f6;color:#30295c}pre,p{white-space:pre-wrap;overflow-wrap:anywhere}pre{max-height:14rem;overflow:auto}a{color:#443294}
+*{box-sizing:border-box}body{margin:0;background:#f5f6fa;color:#1d2537;font:16px/1.55 system-ui}main{max-width:760px;margin:auto;padding:28px 18px}header,.actions{display:flex;align-items:center;justify-content:space-between;gap:.6rem;flex-wrap:wrap}h1,h2,p{margin:.4em 0}h1{letter-spacing:-.045em}h2{font-size:1.18rem}article,details{background:white;border:1px solid #dadfea;border-radius:14px;padding:18px;margin:12px 0}button{border:0;color:#fff;background:#423499;padding:10px 15px;border-radius:9px;cursor:pointer;font:inherit}button:disabled{opacity:.6}small,summary{color:#51419a}summary{cursor:pointer}label{display:block;margin-top:12px;font-weight:600}input,textarea,select{display:block;width:100%;font:inherit;padding:9px;border-radius:6px;border:1px solid #bcc1d0}textarea{min-height:9em}.actions{justify-content:flex-start;margin-top:10px}.actions button+button{background:#eae9f6;color:#30295c}pre,p{white-space:pre-wrap;overflow-wrap:anywhere}pre{max-height:14rem;overflow:auto}a{color:#443294}
 </style></head><body><main><small>HireMate</small><header><h1>Your outreach</h1><button id="scan">Check for posts</button></header>
+<details><summary>My saved search</summary>
+<label for="roles">Roles or skills (separate with commas)</label><input id="roles" maxlength="240" placeholder="GenAI, machine learning">
+<label for="locations">Locations (separate with commas)</label><input id="locations" maxlength="240" placeholder="Any location">
+<label for="workplace">Work arrangement</label><select id="workplace"><option>Any</option><option>Remote</option><option>Hybrid</option><option>Onsite</option></select>
+<label for="employment">Employment type</label><select id="employment"><option>Any</option><option>Contract</option><option>Full-time</option></select>
+<div class="actions"><button id="saveSearch">Save search</button><button id="browserSearch" hidden>Find posts in my browser</button></div>
+<p id="browserHint" hidden>To search through your signed-in browser, load the HireMate extension from the project’s browser folder in Chrome.</p></details>
 <p id="mode"></p><p id="counts"></p><details id="connection" hidden><summary id="connectionState">LinkedIn connection</summary><label for="token">New session token</label><input id="token" type="password" autocomplete="off"><button id="rotate">Refresh connection</button></details><label><input style="width:auto;display:inline" type="checkbox" id="approval"> Review new drafts before sending</label><details><summary id="resume">My résumé</summary><pre id="preview"></pre>
 <label for="file">Choose a Word, text, or PDF file</label><input id="file" type="file" accept=".doc,.docx,.txt,.pdf"><button id="upload">Use this résumé</button></details>
 <p role="status" id="notice"></p><section id="list"></section></main><script>
@@ -17,6 +24,10 @@ el('mode').textContent=data.source+' · '+(data.dry?'Practice mode':'Live delive
 el('connection').hidden=!data.rotate;el('connectionState').textContent='LinkedIn · '+data.connection;
 el('counts').textContent=data.posts.length+' posts checked · '+data.posts.filter(p=>p.status==='Ready for review').length+' ready to review · '+data.sent_today+' sent today';
 el('approval').checked=data.approval;
+for(const key of searchFields) el(key).value=data.search[key];
+const local=data.dry && ['localhost','127.0.0.1'].includes(location.hostname);
+el('browserSearch').hidden=!local;
+el('browserHint').hidden=!local || document.documentElement.dataset.hiremateBrowser==='ready';
 el('resume').textContent=data.resume?'My résumé · '+data.resume.name:'Add your résumé';
 el('preview').textContent=data.resume?.text||'';el('list').replaceChildren();
 for(const p of data.posts){const c=add(el('list'),'article','');add(c,'small',p.status+' · '+(p.date_kind==='observed'?'Seen ':'')+p.published);add(c,'h2',p.title);add(c,'p',p.text);
@@ -32,7 +43,18 @@ for(const [action,label] of [['approve','Approve and queue'],['save','Save edits
 bind(add(actions,'button',label),async()=>{await api('/api/posts/'+p.id,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({subject:subject.value,message:body.value,action})});return 'Draft updated.'})}
 }}
 el('approval').onchange=async()=>{try{await api('/api/preferences/approval',{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({required:el('approval').checked})})}catch(e){el('notice').textContent=e.message}await refresh()};
-bind(el('scan'),async()=>{const d=await api('/api/scan',{method:'POST',headers});return 'New posts found: '+d.new});
+const searchFields=['roles','locations','workplace','employment'];
+function saveSearch(){return api('/api/preferences/search',{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(searchFields.map(k=>[k,el(k).value.trim()])))})}
+bind(el('saveSearch'),async()=>{await saveSearch();return 'Search saved.'});
+document.addEventListener('hiremate-results',()=>refresh().catch(e=>el('notice').textContent=e.message));
+document.addEventListener('hiremate-finished',()=>el('browserSearch').disabled=false);
+el('browserSearch').onclick=async()=>{
+  if(document.documentElement.dataset.hiremateBrowser!=='ready'){el('browserHint').hidden=false;el('notice').textContent='Load the extension and reload this page.';return}
+  el('browserSearch').disabled=true;
+  try{const search=await saveSearch();el('notice').textContent='Checking LinkedIn posts…';document.dispatchEvent(new CustomEvent('hiremate-search',{detail:search.url}))}
+  catch(e){el('notice').textContent=e.message;el('browserSearch').disabled=false}
+};
+bind(el('scan'),async()=>{await saveSearch();const d=await api('/api/scan',{method:'POST',headers});return 'New posts found: '+d.new});
 bind(el('rotate'),async()=>{await api('/api/connection',{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({cookie:el('token').value})});el('token').value='';return 'Connection updated.'});
 bind(el('upload'),async()=>{const file=el('file').files[0];if(!file)throw Error('Choose a résumé first.');await api('/api/resume',{method:'POST',headers:{...headers,'X-Filename':encodeURIComponent(file.name)},body:file});return 'Résumé saved.'});
 refresh().catch(e=>el('notice').textContent=e.message);

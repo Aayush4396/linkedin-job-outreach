@@ -18,8 +18,11 @@ from pydantic import BaseModel, Field
 from . import settings as cfg
 from .resumes import save
 from .storage import all_posts, read, transact
+from .search import Search, saved_search
+from .sources import validate
+from .post_discovery import linkedin_id
 from .store import import_preview
-from .workflow import collect, dispatch, prepare, review
+from .workflow import collect, collect_results, dispatch, prepare, review
 
 
 async def repeat(function, seconds):
@@ -86,7 +89,7 @@ def posts():
     today = datetime.now(ZoneInfo(cfg.ZONE)).date().isoformat()
     sent_today = sum(p.get("sent_day") == today for p in rows)
     health = read("settings", "linkedin") or {}
-    return {"sent_today": sent_today, "rotate": bool(cfg.BUCKET and cfg.LINKEDIN_COOKIE and not cfg.FEED),
+    return {"search": saved_search().model_dump(), "sent_today": sent_today, "rotate": bool(cfg.BUCKET and cfg.LINKEDIN_COOKIE and not cfg.FEED),
             "connection": "Reconnect your account" if health.get("expired") else ("Connected" if health.get("connected") else "Awaiting scan"),
             "source": "Connected feed" if cfg.FEED else ("LinkedIn search" if cfg.LINKEDIN_COOKIE else "Sample posts"), "posts": rows,
             "resume": read("settings","resume"), "dry": cfg.DRY, "approval": (read("settings","approval") or {"required":cfg.APPROVAL})["required"]}
@@ -187,3 +190,28 @@ def update_connection(connection: Connection):
     rotate_cookie(connection.cookie)
     transact(lambda get, put: put("settings", "linkedin", {"connected":False}))
     return {"ok": True}
+
+
+@app.post("/api/preferences/search")
+def update_search(search: Search):
+    transact(lambda get, put: put("settings", "search", search.model_dump()))
+    return {"url": search.url()}
+
+
+class BrowserPost(BaseModel):
+    url: str = Field(max_length=2048)
+    title: str = Field(min_length=1, max_length=300)
+    text: str = Field(min_length=1, max_length=30000)
+    published: str = Field(max_length=40)
+    date_kind: Literal["published", "observed", "unknown"]
+    content_kind: Literal["full", "snippet"]
+
+
+@app.post("/api/browser-results")
+def browser_results(request: Request, posts: list[BrowserPost]):
+    if not cfg.DRY or cfg.BUCKET or request.url.hostname not in {"localhost","127.0.0.1","testserver"}:
+        raise HTTPException(403, "Browser testing requires a local dashboard in practice mode.")
+    if len(posts) > 30 or any(not linkedin_id(p.url) for p in posts):
+        raise HTTPException(422, "Expected individual LinkedIn posts.")
+    rows = validate([p.model_dump() for p in posts])
+    return {"new": collect_results(rows, saved_search()), "checked": len(rows)}
