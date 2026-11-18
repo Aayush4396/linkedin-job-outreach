@@ -5,6 +5,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
+from .post_discovery import linkedin_id
+
 
 def read_posts(feed_url):
     if feed_url:
@@ -23,10 +25,18 @@ def validate(posts):
     if not isinstance(posts, list):
         raise ValueError("Expected a list of posts")
     for post in posts:
-        for field in ("url", "published", "title", "text"):
+        for field in ("url", "title", "text"):
             if not isinstance(post.get(field), str) or not post[field].strip():
                 raise ValueError(f"Missing post field {field}")
         if urlsplit(post["url"]).scheme != "https":
             raise ValueError("Invalid post URL")
-        date.fromisoformat(post["published"])
-    return [{field: post[field] for field in ("url", "published", "title", "text")} for post in posts]
+        if post.get("date_kind", "published") == "published":
+            try:
+                date.fromisoformat(post.get("published", ""))
+            except (TypeError, ValueError):
+                if not linkedin_id(post["url"]):
+                    raise ValueError("Missing or invalid publication date")
+                post["date_kind"] = "unknown"
+                post["published"] = ""
+        post.setdefault("published", "")
+    return [{field: post[field] for field in ("url", "published", "title", "text", "date_kind", "content_kind") if field in post} for post in posts]

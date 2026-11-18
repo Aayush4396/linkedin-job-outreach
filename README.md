@@ -45,3 +45,9 @@ To enable real mail after testing, redeploy with DRY_RUN=false and supply GMAIL_
     python -m unittest discover -s tests
 
 The tests use temporary local data and mock external delivery. Production validation requires an authorized live feed, an enabled Vertex model, a Google Cloud project and an eligible sender mailbox.
+
+## LinkedIn discovery pilot
+
+Run `python -m app.discovery_pilot` with an authorized source configured. This command fetches the source twice into a temporary database and never calls Gemini or Gmail. It passes only when a relevant LinkedIn post published within 14 days has explicit application instructions and the second independent fetch returns its ID again without inserting another record. New unrelated posts on the second scan are allowed.
+
+Feed records should carry the original publication date and full post text. Mark excerpts with `content_kind: snippet` and observation dates with `date_kind: observed`. The browser connector marks a scan date as observed when no machine-readable date is available. Such records stay unverified. Posts directing applicants to a form appear as “Apply via link”.

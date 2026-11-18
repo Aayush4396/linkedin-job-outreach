@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from . import settings as cfg
 from .resumes import attachment
+from .post_discovery import instructions, linkedin_id
 from .sources import read_posts
 from .storage import all_posts, read, transact
 from .store import EMAIL, ROLE
@@ -26,20 +27,32 @@ def capture(post, sample):
     addresses = sorted(set(x.lower() for x in EMAIL.findall(post["text"])))
     recipient = addresses[0] if len(addresses) == 1 else ""
     relevant = ROLE.search(post["title"] + " " + post["text"])
+    post_id = linkedin_id(post["url"])
+    route, apply_link = None, ""
+    if post_id and not sample:
+        route, recipient, apply_link = instructions(post)
+
     def insert(get, put):
-        if get("posts", uid):
+        index = get("linkedin_ids", post_id) if post_id else None
+        record_id = index["post"] if index else uid
+        previous = get("posts", record_id)
+        if previous and not (previous["status"] == "Unverified lead" and route and route != "Unverified lead"):
             return 0
         status = "Needs draft"
         if not relevant:
             status = "Outside target roles"
+        elif route and route != "Needs draft":
+            status = route
         elif not recipient:
             status = "Check recipients" if addresses else "No email listed"
         elif get("recipients", key(recipient)):
             status = "Recipient already seen"
         else:
-            put("recipients", key(recipient), {"post": uid})
-        put("posts", uid, dict(post, id=uid, recipient=recipient, status=status, sample=sample))
-        return 1
+            put("recipients", key(recipient), {"post": record_id})
+        if post_id:
+            put("linkedin_ids", post_id, {"post": record_id})
+        put("posts", record_id, dict(post, id=record_id, recipient=recipient, status=status, sample=sample, apply_link=apply_link))
+        return int(previous is None)
     return transact(insert)
 
 
@@ -145,3 +158,4 @@ def dispatch():
             transact(lambda get, put: put("posts", post["id"], dict(post, status="Sent", sent_day=day)))
         return 1
     return 0
+

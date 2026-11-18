@@ -19,8 +19,9 @@ el('counts').textContent=data.posts.length+' posts checked · '+data.posts.filte
 el('approval').checked=data.approval;
 el('resume').textContent=data.resume?'My résumé · '+data.resume.name:'Add your résumé';
 el('preview').textContent=data.resume?.text||'';el('list').replaceChildren();
-for(const p of data.posts){const c=add(el('list'),'article','');add(c,'small',p.status+' · '+p.published);add(c,'h2',p.title);add(c,'p',p.text);
+for(const p of data.posts){const c=add(el('list'),'article','');add(c,'small',p.status+' · '+(p.date_kind==='observed'?'Seen ':'')+p.published);add(c,'h2',p.title);add(c,'p',p.text);
 if(!p.sample){const a=add(c,'a','Original post');a.href=p.url}
+if(p.apply_link){const a=add(c,'a',' Open application');a.href=p.apply_link}
 if(!p.message)continue;
 add(c,'p','To: '+p.recipient+' · Attachment: '+p.filename);
 if(p.status!=='Ready for review'){add(c,'p',p.subject);continue}
@@ -36,3 +37,4 @@ bind(el('rotate'),async()=>{await api('/api/connection',{method:'POST',headers:{
 bind(el('upload'),async()=>{const file=el('file').files[0];if(!file)throw Error('Choose a résumé first.');await api('/api/resume',{method:'POST',headers:{...headers,'X-Filename':encodeURIComponent(file.name)},body:file});return 'Résumé saved.'});
 refresh().catch(e=>el('notice').textContent=e.message);
 </script></body></html>
+

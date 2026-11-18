@@ -33,9 +33,15 @@ def collect_posts(cookie, query):
                 content = body.inner_text().strip()
                 if not content or not re.search(r"\b(hiring|vacanc\w*|open role|opening|apply|join our team)\b", content, re.I):
                     continue
+                stamp = card.locator("time[datetime]").first
+                published = stamp.get_attribute("datetime") if stamp.count() else None
+                try:
+                    post_date = date.fromisoformat((published or "")[:10]).isoformat()
+                except ValueError:
+                    post_date = None
                 posts.append({"url": "https://www.linkedin.com/feed/update/" + urn + "/", "text": content,
-                              "title": content.splitlines()[0][:180], "published": date.today().isoformat(),
-                              "date_kind": "observed"})
+                              "title": content.splitlines()[0][:180], "published": post_date or date.today().isoformat(),
+                              "date_kind": "published" if post_date else "observed"})
             return validate(posts)
         finally:
             browser.close()
