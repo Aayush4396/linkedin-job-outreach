@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import random
 import time
 from datetime import datetime, timezone
@@ -10,6 +11,7 @@ import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 from urllib.parse import unquote
 
 from fastapi import FastAPI, HTTPException, Request
@@ -23,7 +25,7 @@ from .search import Search, saved_search
 from .sources import validate
 from .post_discovery import application_link, is_linkedin_search, linkedin_id
 from .store import EMAIL, import_preview
-from .workflow import claim_manual_scan, collect, collect_results, dispatch, prepare, review
+from .workflow import assess, capture, claim_manual_scan, collect, collect_results, dispatch, prepare, review
 
 __all__ = [
     "app",
@@ -252,10 +254,26 @@ class BrowserPost(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     text: str = Field(min_length=1, max_length=30000)
     published: str = Field(max_length=40)
-    date_kind: Literal["published", "observed", "unknown"]
+    date_kind: Literal["published", "relative", "observed", "unknown"]
     content_kind: Literal["full", "snippet"]
     verification_note: str = Field(default="", max_length=240)
     preview_text: str = Field(default="", max_length=30000)
+
+
+# Browser import runs only in the single-process local practice dashboard.
+_browser_progress: dict[UUID, tuple[int, int, float]] = {}
+
+
+@app.get("/api/browser-progress/{scan_id}")
+def browser_progress(scan_id: UUID):
+    state = _browser_progress.get(scan_id)
+    if state is None:
+        return {}
+    completed, total, deadline = state
+    status = {"completed": completed, "total": total}
+    if deadline:
+        status["retry_in"] = max(0, math.ceil(deadline - time.monotonic()))
+    return status
 
 
 @app.post("/api/browser-results")
@@ -267,10 +285,54 @@ def browser_results(request: Request, posts: list[BrowserPost]):
         for p in posts
     ):
         raise HTTPException(422, "Expected LinkedIn posts or search previews.")
-    rows = validate([p.model_dump() for p in posts])
+    try:
+        rows = validate([p.model_dump() for p in posts])
+        token = request.headers.get("x-hiremate-scan")
+        scan_id = UUID(token) if token else None
+    except ValueError as exc:
+        raise HTTPException(422, "Some post details could not be read. Run the search again.") from exc
     for row, post in zip(rows, posts):
         if post.verification_note:
             row["verification_note"] = post.verification_note
         if post.preview_text and linkedin_id(post.url):
             row["preview_text"] = post.preview_text
-    return {"new": collect_results(rows, saved_search()), "checked": len(rows)}
+    def progress(completed, total, delay=0):
+        if scan_id is not None:
+            _browser_progress[scan_id] = (completed, total, time.monotonic() + delay if delay else 0)
+
+    try:
+        target = request.headers.get("x-hiremate-recheck")
+        if target:
+            saved = read("posts", target)
+            if len(rows) != 1 or not saved or saved["status"] != "Unverified lead":
+                raise HTTPException(409, "This lead has changed. Refresh the dashboard.")
+            row = rows[0]
+            if is_linkedin_search(saved["url"]):
+                if (row["url"] != saved["url"] or row["text"] != saved["text"]) and row.get("preview_text") != saved["text"]:
+                    raise HTTPException(422, "The result could not be tied to the saved preview.")
+            elif linkedin_id(saved["url"]) != linkedin_id(row["url"]):
+                raise HTTPException(422, "LinkedIn returned a different post.")
+            if not saved_search().matches(row):
+                row = dict(saved, verification_note="The original no longer matches your saved search.")
+            capture(row, False)
+            current = read("posts", target)
+            resume = read("settings", "resume")
+            if (resume and current["status"] in {"Needs draft", "Unverified lead", "Apply via link",
+                                                 "Check application instructions", "No email listed", "Check recipients"}
+                    and (current["status"] == "Needs draft" or current.get("fit_resume") != resume["version"])):
+                progress(0, 1)
+                assess(current, resume, lambda delay: progress(0, 1, delay))
+            return {"checked": 1, "new": 0, "status": read("posts", target)["status"]}
+        return {"new": collect_results(rows, saved_search(), on_match_progress=progress), "checked": len(rows)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logging.error("Browser import failed (%s, code=%s)", type(exc).__name__, getattr(exc, "code", None))
+        if getattr(exc, "code", None) == 429:
+            raise HTTPException(429, "Résumé matching paused because the AI service is busy or its quota was reached. "
+                                "Saved posts are available below. Try again later to resume matching.") from exc
+        raise HTTPException(502, "HireMate could not finish saving or matching these posts. "
+                            "Check the saved results below and try again.") from exc
+    finally:
+        if scan_id is not None:
+            _browser_progress.pop(scan_id, None)

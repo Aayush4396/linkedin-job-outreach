@@ -40,11 +40,11 @@ def validate(posts):
                 raise ValueError(f"Missing post field {field}")
         if urlsplit(post["url"]).scheme != "https":
             raise ValueError("Invalid post URL")
-        if post.get("date_kind", "published") == "published":
+        if post.get("date_kind", "published") in {"published", "relative"}:
             try:
                 date.fromisoformat(post.get("published", ""))
             except (TypeError, ValueError):
-                if not linkedin_id(post["url"]):
+                if not linkedin_id(post["url"]) and post.get("date_kind") != "relative":
                     raise ValueError("Missing or invalid publication date")
                 post["date_kind"] = "unknown"
                 post["published"] = ""

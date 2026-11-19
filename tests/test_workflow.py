@@ -94,6 +94,69 @@ class OutreachTests(unittest.TestCase):
         self.assertEqual(delays.count(0), 1)
         self.assertTrue(all(delay >= 0 for delay in delays))
 
+    def test_vertex_draft_retry_preserves_successful_match(self):
+        from google.genai.errors import ClientError
+        from types import SimpleNamespace
+        from unittest.mock import Mock, call
+        error = ClientError(429, {}, SimpleNamespace(headers={"Retry-After": "7"}))
+        resume = save("cv.txt", b"Payroll experience.")
+        workflow.capture(dict(url="https://example.org/payroll", title="Accountant",
+                              text="Send resume to jobs@example.org", published="2026-11-18"), False)
+        post = all_posts()[0]
+        progress = Mock()
+        with patch.object(cfg, "MODEL", "test"), patch("google.genai.Client") as client, \
+             patch.object(workflow, "_pace_vertex"), patch("app.workflow.time.sleep") as sleep:
+            model = client.return_value.__enter__.return_value.models.generate_content
+            model.side_effect = [SimpleNamespace(text='{"relevant":true,"reason":"Payroll"}'), error,
+                                 SimpleNamespace(text='{"subject":"Application","body":"My payroll experience."}')]
+            workflow.assess(post, resume, progress)
+            schemas = [c.kwargs["config"]["response_schema"] for c in model.call_args_list]
+            self.assertEqual(schemas, [workflow.ResumeFit, workflow.Pitch, workflow.Pitch])
+            sleep.assert_called_once_with(7)
+            self.assertEqual(progress.call_args_list, [call(7), call(0)])
+            self.assertEqual(read("posts", post["id"])["status"], "Ready for review")
+
+    def test_vertex_retry_budget_and_non_retryable_errors(self):
+        from google.genai.errors import ClientError
+        from types import SimpleNamespace
+        with patch("google.genai.Client") as client, patch.object(workflow, "_pace_vertex"), \
+             patch("app.workflow.random.uniform", side_effect=lambda lo, hi: lo), \
+             patch("app.workflow.time.sleep") as sleep:
+            model = client.return_value.__enter__.return_value.models.generate_content
+            for code, hint, waits in [(403, "5", []), (429, "120", []), (429, "invalid", [5, 10, 20])]:
+                model.side_effect = ClientError(code, {}, SimpleNamespace(headers={"Retry-After": hint}))
+                with self.assertRaises(ClientError):
+                    workflow.generate({"title":"Job","text":"Opening"},{"text":"Résumé"},"test",workflow.Pitch)
+                self.assertEqual([c.args[0] for c in sleep.call_args_list], waits)
+                self.assertEqual(model.call_count, len(waits) + 1)
+                sleep.reset_mock()
+                model.reset_mock()
+
+    def test_browser_quota_error_preserves_saved_post_for_retry(self):
+        from uuid import uuid4
+        class QuotaError(Exception):
+            code = 429
+        scan_id = str(uuid4())
+        headers = {"x-hiremate": "1", "x-hiremate-scan": scan_id}
+        post = dict(url="https://www.linkedin.com/search/results/content/?keywords=accountant",
+                    title="Hiring an accountant", text="Accountant wanted to manage payroll.",
+                    date_kind="unknown", published="", content_kind="snippet")
+        save("cv.txt", b"Accountant in payroll")
+        with TestClient(app) as client:
+            def fail_match(*args):
+                status = client.get("/api/browser-progress/" + scan_id).json()
+                self.assertEqual(status, {"completed": 0, "total": 1})
+                raise QuotaError()
+            with patch.object(workflow, "assess", side_effect=fail_match):
+                response = client.post("/api/browser-results", headers=headers, json=[post])
+            self.assertEqual(response.status_code, 429)
+            self.assertIn("quota", response.json()["detail"])
+            self.assertEqual(len(all_posts()), 1)
+            self.assertEqual(client.get("/api/browser-progress/" + scan_id).json(), {})
+            retry = client.post("/api/browser-results", headers=headers, json=[post])
+            self.assertEqual(retry.json(), {"new": 0, "checked": 1})
+            self.assertIn("fit_resume", all_posts()[0])
+
     def test_copy_link_recovery_promotes_saved_preview(self):
         from datetime import date
         headers = {"x-hiremate": "1"}
@@ -114,6 +177,26 @@ class OutreachTests(unittest.TestCase):
             self.assertEqual(rows[0]["status"], "Ready for review")
             self.assertEqual(rows[0]["recipient"], "payroll@example.org")
             self.assertEqual(rows[0]["url"], original["url"])
+
+    def test_targeted_recheck_reuses_fit_and_promotes_only_saved_lead(self):
+        from datetime import date
+        headers = {"x-hiremate": "1"}
+        post = dict(url="https://www.linkedin.com/search/results/content/?keywords=payroll",
+                    title="Hiring an accountant", text="Hiring an accountant. Send your CV to payroll@example.org",
+                    published="", content_kind="snippet", date_kind="unknown")
+        save("cv.txt", b"Payroll accountant")
+        with TestClient(app) as client:
+            client.post("/api/browser-results", headers=headers, json=[post]).raise_for_status()
+            saved = all_posts()[0]
+            headers["x-hiremate-recheck"] = saved["id"]
+            original = dict(post, url="https://www.linkedin.com/feed/update/urn:li:activity:7527956605288652801/",
+                            published=date.today().isoformat(), date_kind="published", content_kind="full")
+            self.assertEqual(client.post("/api/browser-results", headers=headers, json=[original]).status_code, 422)
+            with patch.object(workflow, "resume_fit", side_effect=AssertionError("Redundant match")):
+                result = client.post("/api/browser-results", headers=headers, json=[dict(original, preview_text=post["text"])])
+            self.assertEqual(result.json()["status"], "Ready for review")
+            self.assertEqual(all_posts()[0]["fit_reason"], saved["fit_reason"])
+            self.assertEqual(len(all_posts()), 1)
 
     def test_saved_search_browser_to_draft(self):
         from datetime import date

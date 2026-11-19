@@ -46,7 +46,7 @@ def application_link(text):
 
 
 def instructions(post, today=None):
-    if post.get("content_kind", "full") != "full" or post.get("date_kind", "published") != "published":
+    if post.get("content_kind", "full") != "full" or post.get("date_kind", "published") not in {"published", "relative"}:
         return "Unverified lead", "", ""
     try:
         age = ((today or date.today()) - date.fromisoformat(post["published"])).days

@@ -53,6 +53,13 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(instructions(dict(self.post,published=(date.today()-timedelta(days=30)).isoformat()))[0],
                          "Outside discovery window")
 
+    def test_relative_age_uses_inclusive_freshness_window(self):
+        today = date(2026, 11, 19)
+        for age, expected in [(14, "Needs draft"), (15, "Outside discovery window")]:
+            post = dict(self.post, date_kind="relative", published=(today - timedelta(days=age)).isoformat())
+            self.assertEqual(instructions(post, today)[0], expected)
+            self.assertEqual(instructions(dict(post, content_kind="snippet"), today)[0], "Unverified lead")
+
     def test_multi_email_uses_action_target(self):
         # A post with a general contact email AND a clear apply-to email:
         # the action-pattern email should win; the footer email must not block it.
