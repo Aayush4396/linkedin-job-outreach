@@ -20,7 +20,7 @@ from .resumes import save
 from .storage import all_posts, read, transact
 from .search import Search, saved_search
 from .sources import validate
-from .post_discovery import linkedin_id
+from .post_discovery import is_linkedin_search, linkedin_id
 from .store import import_preview
 from .workflow import collect, collect_results, dispatch, prepare, review
 
@@ -211,7 +211,10 @@ class BrowserPost(BaseModel):
 def browser_results(request: Request, posts: list[BrowserPost]):
     if not cfg.DRY or cfg.BUCKET or request.url.hostname not in {"localhost","127.0.0.1","testserver"}:
         raise HTTPException(403, "Browser testing requires a local dashboard in practice mode.")
-    if len(posts) > 30 or any(not linkedin_id(p.url) for p in posts):
-        raise HTTPException(422, "Expected individual LinkedIn posts.")
+    if len(posts) > 30 or any(
+        not linkedin_id(p.url) and not (p.content_kind == "snippet" and is_linkedin_search(p.url))
+        for p in posts
+    ):
+        raise HTTPException(422, "Expected LinkedIn posts or search previews.")
     rows = validate([p.model_dump() for p in posts])
     return {"new": collect_results(rows, saved_search()), "checked": len(rows)}

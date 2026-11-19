@@ -11,7 +11,9 @@ if (location.pathname === "/" && document.title.startsWith("HireMate")) {
       });
       const data = await response.json();
       if (!response.ok) throw Error(typeof data.detail === "string" ? data.detail : "Could not import posts.");
-      notice.textContent = data.checked + " posts checked · " + data.new + " new matches";
+      const imported = data.new === 1 ? "1 new post added" : data.new + " new posts added";
+      const checked = data.checked === 1 ? "1 LinkedIn post checked" : data.checked + " LinkedIn posts checked";
+      notice.textContent = checked + " · " + imported;
       document.dispatchEvent(new Event("hiremate-results"));
     } catch (error) {
       notice.textContent = error.message;

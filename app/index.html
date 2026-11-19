@@ -10,7 +10,7 @@
 <label for="workplace">Work arrangement</label><select id="workplace"><option>Any</option><option>Remote</option><option>Hybrid</option><option>Onsite</option></select>
 <label for="employment">Employment type</label><select id="employment"><option>Any</option><option>Contract</option><option>Full-time</option></select>
 <div class="actions"><button id="saveSearch">Save search</button><button id="browserSearch" hidden>Find posts in my browser</button></div>
-<p id="browserHint" hidden>To search through your signed-in browser, load the HireMate extension from the project’s browser folder in Chrome.</p></details>
+<p id="browserHint" hidden>Open this dashboard in the desktop Chrome profile where you installed HireMate and signed in to LinkedIn. If you are viewing it inside Codex, copy the dashboard address into Chrome.</p></details>
 <p id="mode"></p><p id="counts"></p><details id="connection" hidden><summary id="connectionState">LinkedIn connection</summary><label for="token">New session token</label><input id="token" type="password" autocomplete="off"><button id="rotate">Refresh connection</button></details><label><input style="width:auto;display:inline" type="checkbox" id="approval"> Review new drafts before sending</label><details><summary id="resume">My résumé</summary><pre id="preview"></pre>
 <label for="file">Choose a Word, text, or PDF file</label><input id="file" type="file" accept=".doc,.docx,.txt,.pdf"><button id="upload">Use this résumé</button></details>
 <p role="status" id="notice"></p><section id="list"></section></main><script>
@@ -20,7 +20,8 @@ async function api(path,options={}){const r=await fetch(path,options);if(!r.ok){
 function bind(button,action){button.onclick=async()=>{button.disabled=true;try{const message=await action();await refresh();el('notice').textContent=message}catch(e){el('notice').textContent=e.message}finally{button.disabled=false}}}
 const headers={'X-HireMate':'1'};
 async function refresh(){const data=await api('/api/posts');
-el('mode').textContent=data.source+' · '+(data.dry?'Practice mode':'Live delivery')+' · '+(data.approval?'Approval required':'Automatic sending');
+const source=data.source==='Sample posts' && data.posts.some(p=>!p.sample)?'LinkedIn browser results':data.source;
+el('mode').textContent=source+' · '+(data.dry?'Practice mode':'Live delivery')+' · '+(data.approval?'Approval required':'Automatic sending');
 el('connection').hidden=!data.rotate;el('connectionState').textContent='LinkedIn · '+data.connection;
 el('counts').textContent=data.posts.length+' posts checked · '+data.posts.filter(p=>p.status==='Ready for review').length+' ready to review · '+data.sent_today+' sent today';
 el('approval').checked=data.approval;
@@ -30,8 +31,16 @@ el('browserSearch').hidden=!local;
 el('browserHint').hidden=!local || document.documentElement.dataset.hiremateBrowser==='ready';
 el('resume').textContent=data.resume?'My résumé · '+data.resume.name:'Add your résumé';
 el('preview').textContent=data.resume?.text||'';el('list').replaceChildren();
-for(const p of data.posts){const c=add(el('list'),'article','');add(c,'small',p.status+' · '+(p.date_kind==='observed'?'Seen ':'')+p.published);add(c,'h2',p.title);add(c,'p',p.text);
-if(!p.sample){const a=add(c,'a','Original post');a.href=p.url}
+for(const p of data.posts){const c=add(el('list'),'article','');const date=p.published && (p.date_kind==='observed'?'Seen ':'')+p.published;
+add(c,'small',date?p.status+' · '+date:p.status);
+if(p.status==='Unverified lead'){
+  const missing=[];
+  if(p.date_kind && p.date_kind!=='published') missing.push('publication date');
+  if(p.content_kind==='snippet') missing.push('full post text');
+  if(p.url.startsWith('https://www.linkedin.com/search/results/content/')) missing.push('individual post link');
+  if(missing.length) add(c,'p','Could not verify the '+missing.join(' or ')+'. Use the LinkedIn link to review it.');
+}add(c,'h2',p.title);add(c,'p',p.text);
+if(!p.sample){const a=add(c,'a',p.url.startsWith('https://www.linkedin.com/search/results/content/')?'View LinkedIn search':'Original post');a.href=p.url}
 if(p.apply_link){const a=add(c,'a',' Open application');a.href=p.apply_link}
 if(!p.message)continue;
 add(c,'p','To: '+p.recipient+' · Attachment: '+p.filename);
@@ -43,13 +52,15 @@ for(const [action,label] of [['approve','Approve and queue'],['save','Save edits
 bind(add(actions,'button',label),async()=>{await api('/api/posts/'+p.id,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({subject:subject.value,message:body.value,action})});return 'Draft updated.'})}
 }}
 el('approval').onchange=async()=>{try{await api('/api/preferences/approval',{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({required:el('approval').checked})})}catch(e){el('notice').textContent=e.message}await refresh()};
+new MutationObserver(()=>{if(document.documentElement.dataset.hiremateBrowser==='ready') el('browserHint').hidden=true})
+.observe(document.documentElement,{attributes:true,attributeFilter:['data-hiremate-browser']});
 const searchFields=['roles','locations','workplace','employment'];
 function saveSearch(){return api('/api/preferences/search',{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(searchFields.map(k=>[k,el(k).value.trim()])))})}
 bind(el('saveSearch'),async()=>{await saveSearch();return 'Search saved.'});
 document.addEventListener('hiremate-results',()=>refresh().catch(e=>el('notice').textContent=e.message));
 document.addEventListener('hiremate-finished',()=>el('browserSearch').disabled=false);
 el('browserSearch').onclick=async()=>{
-  if(document.documentElement.dataset.hiremateBrowser!=='ready'){el('browserHint').hidden=false;el('notice').textContent='Load the extension and reload this page.';return}
+  if(document.documentElement.dataset.hiremateBrowser!=='ready'){el('browserHint').hidden=false;el('notice').textContent='This tab cannot see the extension. In desktop Chrome, open '+location.origin+'/ in your LinkedIn profile.';return}
   el('browserSearch').disabled=true;
   try{const search=await saveSearch();el('notice').textContent='Checking LinkedIn posts…';document.dispatchEvent(new CustomEvent('hiremate-search',{detail:search.url}))}
   catch(e){el('notice').textContent=e.message;el('browserSearch').disabled=false}

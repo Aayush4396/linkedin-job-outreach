@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from . import settings as cfg
 from .resumes import attachment
-from .post_discovery import instructions, is_linkedin_url, linkedin_id
+from .post_discovery import instructions, is_linkedin_search, is_linkedin_url, linkedin_id
 from .search import saved_search
 from .sources import read_posts
 from .storage import all_posts, read, transact
@@ -24,7 +24,9 @@ def key(value):
 
 
 def capture(post, sample):
-    uid = key(post["url"])
+    search_preview = is_linkedin_search(post["url"])
+    identity = "linkedin-preview:" + " ".join(post["text"].split()).casefold() if search_preview else post["url"]
+    uid = key(identity)
     addresses = sorted(set(x.lower() for x in EMAIL.findall(post["text"])))
     recipient = addresses[0] if len(addresses) == 1 else ""
     relevant = ROLE.search(post["title"] + " " + post["text"])

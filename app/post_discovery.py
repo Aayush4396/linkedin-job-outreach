@@ -11,6 +11,12 @@ def is_linkedin_url(url):
     return host == "linkedin.com" or host.endswith(".linkedin.com")
 
 
+def is_linkedin_search(url):
+    page = urlsplit(url)
+    return (page.scheme == "https" and page.netloc == "www.linkedin.com"
+            and page.path == "/search/results/content/")
+
+
 def linkedin_id(url):
     page = urlsplit(url)
     if page.scheme != "https" or not is_linkedin_url(url):
