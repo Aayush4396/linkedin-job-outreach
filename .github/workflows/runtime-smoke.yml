@@ -28,7 +28,13 @@ jobs:
       - name: Verify service startup
         run: |
           docker run -d --name preview -p 127.0.0.1:8766:8080 -e EXTERNAL_SCHEDULER=true hiremate:candidate
-          curl --fail --retry 15 --retry-connrefused --retry-delay 1 http://127.0.0.1:8766/api/posts > /dev/null
+          for attempt in {1..30}; do
+            if curl -fsS --max-time 3 http://127.0.0.1:8766/api/posts > /dev/null; then exit 0; fi
+            if [[ "$(docker inspect -f '{{.State.Running}}' preview)" != true ]]; then break; fi
+            sleep 1
+          done
+          docker logs preview
+          exit 1
       - name: Measure against the previous runtime
         run: |
           mkdir -p "$RUNNER_TEMP/previous"
