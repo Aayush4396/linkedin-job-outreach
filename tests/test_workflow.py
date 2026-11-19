@@ -94,6 +94,27 @@ class OutreachTests(unittest.TestCase):
         self.assertEqual(delays.count(0), 1)
         self.assertTrue(all(delay >= 0 for delay in delays))
 
+    def test_copy_link_recovery_promotes_saved_preview(self):
+        from datetime import date
+        headers = {"x-hiremate": "1"}
+        snippet = dict(url="https://www.linkedin.com/search/results/content/?keywords=accountant",
+                       title="Hiring an accountant", text="Hiring an accountant for our payroll team.",
+                       date_kind="unknown", published="", content_kind="snippet")
+        original = dict(snippet, url="https://www.linkedin.com/feed/update/urn:li:activity:7527956605288652801/",
+                        text=snippet["text"] + " Send your CV to payroll@example.org",
+                        preview_text=snippet["text"], date_kind="published",
+                        published=date.today().isoformat(), content_kind="full")
+        save("cv.txt", b"Accountant with payroll experience.")
+        with TestClient(app) as client:
+            for item, expected in [(snippet, 1), (original, 0), (original, 0)]:
+                result = client.post("/api/browser-results", headers=headers, json=[item])
+                self.assertEqual(result.json(), {"new": expected, "checked": 1})
+            rows = client.get("/api/posts").json()["posts"]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["status"], "Ready for review")
+            self.assertEqual(rows[0]["recipient"], "payroll@example.org")
+            self.assertEqual(rows[0]["url"], original["url"])
+
     def test_saved_search_browser_to_draft(self):
         from datetime import date
         prefs = dict(roles="GenAI", locations="India", workplace="Remote", employment="Contract")

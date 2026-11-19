@@ -40,6 +40,8 @@ def key(value):
 
 
 def capture(post, sample):
+    post = post.copy()
+    preview_text = post.pop("preview_text", "")
     search_preview = is_linkedin_search(post["url"])
     identity = "linkedin-preview:" + " ".join(post["text"].split()).casefold() if search_preview else post["url"]
     uid = key(identity)
@@ -56,7 +58,14 @@ def capture(post, sample):
         index = get("linkedin_ids", post_id) if post_id else None
         record_id = index["post"] if index else uid
         previous = get("posts", record_id)
-        if previous and previous["status"] != "Outside target roles" and not (previous.get("route", previous["status"]) == "Unverified lead" and route and route != "Unverified lead"):
+        if post_id and not previous and preview_text:
+            preview_id = key("linkedin-preview:" + " ".join(preview_text.split()).casefold())
+            preview = get("posts", preview_id)
+            if preview and is_linkedin_search(preview["url"]):
+                record_id = preview_id
+                previous = preview
+        recovered_link = previous and post_id and is_linkedin_search(previous["url"])
+        if previous and not recovered_link and previous["status"] != "Outside target roles" and not (previous.get("route", previous["status"]) == "Unverified lead" and route and route != "Unverified lead"):
             if (previous.get("route", previous["status"]) == "Unverified lead"
                     and post.get("verification_note") and post["verification_note"] != previous.get("verification_note")):
                 put("posts", record_id, dict(previous, verification_note=post["verification_note"]))

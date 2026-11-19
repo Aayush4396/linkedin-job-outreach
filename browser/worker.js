@@ -15,14 +15,14 @@ async function search(message, sender) {
   for (let attempt = 0; attempt < 30; attempt++) {
     await new Promise(resolve => setTimeout(resolve, 1000));
     if ((await chrome.tabs.get(tab.id)).status !== "complete") continue;
-    const [scan] = await chrome.scripting.executeScript({target:{tabId:tab.id},func:readPosts,args:[attempt<29]});
+    const [scan] = await chrome.scripting.executeScript({target:{tabId:tab.id},world:'MAIN',func:readPosts,args:[attempt<29]});
     diagnostic = scan.result.diagnostic || diagnostic;
     if (scan.result.error) throw Error(scan.result.error);
     if (scan.result.posts.length || scan.result.empty) {
       const posts = scan.result.posts;
       for (const post of posts) {
         if (post.date_kind !== "published" || post.content_kind !== "full") {
-          await checkOriginal(post, tab.id);
+          await checkOriginal(post);
         }
       }
       return posts;
@@ -31,36 +31,39 @@ async function search(message, sender) {
   throw Error("Could not import LinkedIn results. " + diagnostic);
 }
 
-async function checkOriginal(post, tabId) {
+async function checkOriginal(post) {
   const url = new URL(post.url);
   if (url.origin !== "https://www.linkedin.com" || url.pathname.startsWith("/search/")) return;
-  // Read the original page's own publication record. A login wall or missing
-  // record leaves the preview intact and does not discard other results.
+  let originalTab;
   try {
-    const response = await fetch(url, {credentials:"include", redirect:"follow", signal:AbortSignal.timeout(5000)});
-    const finalUrl = new URL(response.url);
-    if (finalUrl.origin === url.origin && /^\/(?:signup|authwall|checkpoint|login|uas)(?:\/|$)/.test(finalUrl.pathname)) {
-      post.verification_note = "LinkedIn showed a sign-in or sign-up page when HireMate checked the original post.";
-      return;
+    originalTab = await chrome.tabs.create({url:url.href, active:false});
+    for (let attempt=0; attempt<20; attempt++) {
+      await new Promise(resolve=>setTimeout(resolve,400));
+      if ((await chrome.tabs.get(originalTab.id)).status!=="complete") continue;
+      const [scan] = await chrome.scripting.executeScript({
+        target:{tabId:originalTab.id}, func:publicationRecord, args:[post.url]
+      });
+      const result = scan.result;
+      if (result.stop) {
+        post.verification_note = result.stop;
+        return;
+      }
+      Object.assign(post,result.evidence);
+      if (post.content_kind==="full" && post.date_kind==="published") {
+        post.verification_note = "Confirmed the original post, publication date and complete text.";
+        return;
+      }
     }
-    if (!response.ok || finalUrl.origin !== url.origin) {
-      post.verification_note = "LinkedIn did not open the original post for this check.";
-      return;
-    }
-    const [result] = await chrome.scripting.executeScript({
-      target:{tabId}, func:publicationRecord, args:[await response.text(), post.url]
-    });
-    if (result.result) Object.assign(post,result.result);
-    post.verification_note = !result.result ? "The original page opened, but its publication details could not be tied to this post." :
-      post.content_kind!=="full" ? "The original page was identified, but its complete text could not be confirmed." :
-      post.date_kind!=="published" ? "The original page was identified, but its publication date could not be confirmed." :
-      "Confirmed the publication date and complete text.";
+    post.verification_note = post.date_kind==="published" ? "Opened the original; the complete text is still unconfirmed." :
+      "Opened the original; the publication date is still unconfirmed.";
   } catch {
-    post.verification_note = "The original-page check could not finish. A later scan can try again.";
+    post.verification_note = "The original post could not be read in the signed-in browser.";
+  } finally {
+    if (originalTab) await chrome.tabs.remove(originalTab.id).catch(()=>{});
   }
 }
 
-function publicationRecord(html, original) {
+function publicationRecord(original) {
   function postId(value) {
     let url;
     try { url = new URL(value, "https://www.linkedin.com"); } catch { return ""; }
@@ -72,21 +75,21 @@ function publicationRecord(html, original) {
       url.pathname.match(/^\/posts\/[^/]*-(\d{15,21})(?:-[^/]*)?\/?$/)?.[1] || "";
   }
   const id = postId(original);
-  if (!id) return null;
-  // Template contents are inert, including images, frames and scripts.
-  const template = document.createElement("template");
-  template.innerHTML = html;
+  if (/^\/(?:signup|authwall|checkpoint|login|uas)(?:\/|$)/.test(location.pathname)) {
+    return {stop:"LinkedIn requested sign-in when opening the original post."};
+  }
+  if (!id || postId(location.href)!==id) return {stop:"LinkedIn opened a different page from the requested post."};
   const evidence = {};
   function addDate(date) {
     if (typeof date==="string" && /^\d{4}-\d{2}-\d{2}(?:T|$)/.test(date) && Number.isFinite(Date.parse(date))) {
       Object.assign(evidence,{published:date.slice(0,10),date_kind:"published"});
     }
   }
-  const canonical = template.content.querySelector('link[rel="canonical"]')?.getAttribute("href");
+  const canonical = document.querySelector('link[rel="canonical"]')?.getAttribute("href");
   if (canonical && postId(canonical)===id) {
-    addDate(template.content.querySelector('meta[property="article:published_time"]')?.getAttribute("content"));
+    addDate(document.querySelector('meta[property="article:published_time"]')?.getAttribute("content"));
   }
-  for (const script of template.content.querySelectorAll('script[type="application/ld+json"]')) {
+  for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
     let data;
     try { data = JSON.parse(script.textContent); } catch { continue; }
     const nodes = [data].flat().flatMap(node=>[node,...[node?.["@graph"]].flat()]);
@@ -100,7 +103,25 @@ function publicationRecord(html, original) {
       }
     }
   }
-  return Object.keys(evidence).length ? evidence : null;
+  const cards = Array.from(document.querySelectorAll("[data-urn],[data-activity-urn],[data-id]"))
+    .filter(node=>["data-urn","data-activity-urn","data-id"].some(attr=>
+      ["activity","share","ugcPost"].some(type=>node.getAttribute(attr)==="urn:li:"+type+":"+id)));
+  for (const card of cards) {
+    if (card.querySelector("article,[role=article],[data-urn^='urn:li:activity:']")) continue;
+    const body = card.querySelector(".update-components-text,.feed-shared-update-v2__description,[data-view-name='feed-commentary'],[data-testid='expandable-text-box']");
+    if (!body) continue;
+    const stamp = card.querySelector("time[datetime]");
+    if (!evidence.published && stamp) addDate(stamp.getAttribute("datetime"));
+    const more = Array.from(card.querySelectorAll("button,[role=button]")).find(button=>
+      /^(?:(?:see|show|read)\s+)?[.…\s]*more(?:,?\s+expand.*)?$/i.test((button.getAttribute("aria-label") || button.innerText || "").trim()));
+    if (more && !more.dataset.hiremateExpanded) {
+      more.dataset.hiremateExpanded="true";
+      more.click();
+    }
+    const text = body.innerText.trim();
+    if (!more && text && text.length<=30000 && !evidence.text) Object.assign(evidence,{text,content_kind:"full"});
+  }
+  return {evidence};
 }
 
 async function readPosts(allowExpansion=true) {
@@ -127,6 +148,58 @@ async function readPosts(allowExpansion=true) {
   const headings = Array.from(root.querySelectorAll(headingSelector)).filter(h=>/^feed post$/i.test(h.textContent.trim()));
   const menus = Array.from(root.querySelectorAll("button[aria-label]")).filter(b=>/control menu for post|more options for post/i.test(b.getAttribute("aria-label")));
   const posts = new Map();
+  // LinkedIn can generate the URL inside its copy handler. Capture just that
+  // command's outgoing permalink; never read the user's clipboard.
+  async function copyPermalink(button) {
+    let finish;
+    const captured = new Promise(resolve=>{finish=resolve});
+    const restore = [];
+    function accept(text) {
+      if (typeof text!=="string" || text.length>2048) return false;
+      let url;
+      try { url = new URL(text.trim()); } catch { return false; }
+      if (url.origin!==location.origin || !idOf({href:url.href,getAttribute:()=>""})) return false;
+      finish(url.href);
+      return true;
+    }
+    function wrap(target, name, interceptor) {
+      if (!target || typeof target[name]!=="function") return;
+      const prior = Object.getOwnPropertyDescriptor(target,name);
+      const original = target[name];
+      const wrapped = function(...args) {
+        return interceptor.call(this,original,args);
+      };
+      Object.defineProperty(target,name,{configurable:true,writable:true,value:wrapped});
+      restore.push(()=>{
+        if (target[name]!==wrapped) return;
+        if (prior) Object.defineProperty(target,name,prior);
+        else delete target[name];
+      });
+    }
+    let timer;
+    try {
+      wrap(navigator.clipboard,"writeText",function(original,args) {
+        return accept(args[0]) ? Promise.resolve() : original.apply(this,args);
+      });
+      wrap(document,"execCommand",function(original,args) {
+        if (String(args[0]).toLowerCase()==="copy") {
+          const field = document.activeElement;
+          const selected = field && /^(INPUT|TEXTAREA)$/.test(field.tagName) ?
+            field.value.slice(field.selectionStart,field.selectionEnd) : window.getSelection()?.toString();
+          if (accept(selected)) return true;
+        }
+        return original.apply(this,args);
+      });
+      const timeout = new Promise(resolve=>{timer=setTimeout(()=>resolve(""),800)});
+      button.click();
+      return await Promise.race([captured,timeout]);
+    } catch {
+      return "";
+    } finally {
+      clearTimeout(timer);
+      for (const reset of restore.reverse()) reset();
+    }
+  }
   async function menuPermalink(card) {
     const menu = menus.find(button=>card.contains(button));
     if (!menu) return "";
@@ -161,7 +234,19 @@ async function readPosts(allowExpansion=true) {
             return link.href;
           }
         }
-        const embed = Array.from(panels[0].querySelectorAll('button,[role=menuitem],a'))
+        const actions = Array.from(panels[0].querySelectorAll('button,[role=button],[role=menuitem],a'));
+        const copy = actions.find(item=>[item.getAttribute("aria-label"),item.innerText].some(label=>
+          /^copy (?:post link|link(?: to (?:this )?post)?)$/i.test((label || "").trim())));
+        if (copy) {
+          const href = await copyPermalink(copy);
+          if (href) {
+            menu.dataset.hiremateLink = href;
+            return href;
+          }
+          menu.dataset.hiremateCheck = "The copy-link command did not return an identifiable LinkedIn post.";
+          break;
+        }
+        const embed = actions
           .find(item=>/^embed (?:this )?post$/i.test(item.innerText.trim()));
         const visibleDialog = () => Array.from(document.querySelectorAll('[role=dialog],dialog[open]'))
           .find(node=>node.getClientRects().length);
@@ -265,6 +350,7 @@ async function readPosts(allowExpansion=true) {
         const original = await menuPermalink(controls);
         const menu = menus.find(button=>controls.contains(button));
         posts.set(original || "preview:" + title + "\n" + text, {
+          ...(original ? {preview_text:text.slice(0,30000)} : {}),
           verification_note:original ? "Found the original link in the post menu." :
             menu?.dataset.hiremateCheck || (menu ? "The post menu could not be read." : "No post menu or original link was found on this search card."),
           url: original || searchUrl.href, title: title.slice(0,300), text: text.slice(0,30000),

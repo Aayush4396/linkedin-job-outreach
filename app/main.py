@@ -255,6 +255,7 @@ class BrowserPost(BaseModel):
     date_kind: Literal["published", "observed", "unknown"]
     content_kind: Literal["full", "snippet"]
     verification_note: str = Field(default="", max_length=240)
+    preview_text: str = Field(default="", max_length=30000)
 
 
 @app.post("/api/browser-results")
@@ -270,4 +271,6 @@ def browser_results(request: Request, posts: list[BrowserPost]):
     for row, post in zip(rows, posts):
         if post.verification_note:
             row["verification_note"] = post.verification_note
+        if post.preview_text and linkedin_id(post.url):
+            row["preview_text"] = post.preview_text
     return {"new": collect_results(rows, saved_search()), "checked": len(rows)}
