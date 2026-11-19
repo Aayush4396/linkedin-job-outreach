@@ -8,7 +8,9 @@ RUN mkdir -p /opt/browsers && cp -a /ms-playwright/chromium_headless_shell-* /ms
 FROM ubuntu:24.04 AS runtime
 ENV PYTHONPATH=/opt/python PLAYWRIGHT_BROWSERS_PATH=/opt/browsers
 COPY --from=builder /opt/python /opt/python
-RUN apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates libreoffice-writer poppler-utils tesseract-ocr && python3 -m playwright install-deps chromium && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+ARG UBUNTU_MIRROR=https://archive.ubuntu.com/ubuntu
+RUN sed -i -E "s%http://(archive|security).ubuntu.com/ubuntu%${UBUNTU_MIRROR}%g" /etc/apt/sources.list.d/ubuntu.sources && apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates libreoffice-writer poppler-utils tesseract-ocr && python3 -m playwright install-deps chromium && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /opt/browsers /opt/browsers
 WORKDIR /srv
 COPY app app
