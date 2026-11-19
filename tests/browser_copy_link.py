@@ -26,6 +26,40 @@ def main():
         result = page.evaluate("readPosts()")
         assert result["posts"][0]["url"] == original, result
         assert page.evaluate("navigator.clipboard.writeText === window.priorWrite")
+        # Copy can close its menu without exposing a URL. Reopen the same menu for Embed.
+        for host, expected in [("www.linkedin.com", original), ("example.org", search)]:
+            page.set_content(html)
+            page.evaluate("""host => {
+                const actions = document.querySelector('#actions');
+                const copy = document.querySelector('#copy');
+                window.copyCount = 0;
+                copy.onclick = () => { window.copyCount++; actions.hidden = true; };
+                const embed = document.createElement("button");
+                embed.setAttribute("aria-label", "Embed this post");
+                embed.onclick = () => {
+                    actions.hidden = true;
+                    const dialog = document.createElement("dialog");
+                    dialog.textContent = "Embed this post";
+                    const code = document.createElement("textarea");
+                    code.value = '<iframe src="https://' + host + '/embed/feed/update/urn:li:activity:7527956605288652801/"></iframe>';
+                    const close = document.createElement("button");
+                    close.setAttribute("aria-label", "Close");
+                    close.onclick = () => dialog.remove();
+                    dialog.append(code, close);
+                    document.body.append(dialog);
+                    dialog.showModal();
+                };
+                actions.append(embed);
+            }""", host)
+            retry = page.evaluate("readPosts()")["posts"][0]
+            assert retry["url"] == expected, retry
+            assert page.evaluate("window.copyCount === 1 && !document.querySelector('dialog[open]')")
+            if expected == original:
+                assert retry["preview_text"] == retry["text"]
+        page.set_content(html)
+        page.evaluate("""url => document.querySelector('#copy').onclick =
+            () => navigator.clipboard.writeText(url)""", original.replace("www.", "").replace("urn:li:activity:", "urn%3Ali%3Aactivity%3A"))
+        assert page.evaluate("readPosts()")["posts"][0]["url"] == original
         page.goto(original)
         page.set_content("""<main><article data-urn="urn:li:activity:7527956605288652801">
           <time datetime="2026-11-18"></time>

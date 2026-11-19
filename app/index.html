@@ -12,9 +12,10 @@
 <label for="employment">Employment type</label><select id="employment"><option>Any</option><option>Contract</option><option>Full-time</option></select>
 <div class="actions"><button id="saveSearch">Save search</button><button id="browserSearch" hidden>Find posts in my browser</button></div>
 <p id="browserHint" hidden>Open this dashboard in the desktop Chrome profile where you installed HireMate and signed in to LinkedIn. If you are viewing it inside Codex, copy the dashboard address into Chrome.</p></details>
+<p role="status" id="notice"></p><small id="scanClock"></small>
 <p id="mode"></p><p id="counts"></p><details id="connection" hidden><summary id="connectionState">LinkedIn connection</summary><label for="token">New session token</label><input id="token" type="password" autocomplete="off"><button id="rotate">Refresh connection</button></details><label><input style="width:auto;display:inline" type="checkbox" id="approval"> Review new drafts before sending</label><details><summary id="resume">My résumé</summary><pre id="preview"></pre>
 <label for="file">Choose a Word, text, or PDF file</label><input id="file" type="file" accept=".doc,.docx,.txt,.pdf"><button id="upload">Use this résumé</button></details>
-<p role="status" id="notice"></p><section id="list"></section><details id="others" hidden><summary id="otherCount">Other posts checked</summary><div id="otherPosts"></div></details></main><script>
+<button id="recheck" hidden>Check saved leads again</button><section id="list"></section><details id="others" hidden><summary id="otherCount">Other posts checked</summary><div id="otherPosts"></div></details></main><script>
 const el=id=>document.getElementById(id);
 function add(parent,tag,text){const node=document.createElement(tag);node.textContent=text;parent.append(node);return node}
 async function api(path,options={}){const r=await fetch(path,options);if(!r.ok){let msg='Please try again.';try{const d=await r.json();if(typeof d.detail==='string')msg=d.detail}catch{}throw Error(msg)}return r.json()}
@@ -50,11 +51,66 @@ const reasons={
 function missingDetails(p){
   const missing=[];
   if(p.url.startsWith('https://www.linkedin.com/search/results/content/')) missing.push('a direct post link');
-  if(!p.published || (p.date_kind && p.date_kind!=='published')) missing.push('a confirmed publication date');
+  if(!p.published || (p.date_kind && !['published','relative'].includes(p.date_kind))) missing.push('a confirmed publication date');
   if(p.content_kind==='snippet') missing.push('confirmation that the text is complete');
   return missing.join(', ');
 }
 const unverified=data.posts.filter(p=>p.status==='Unverified lead');
+const retryButton=el('recheck');
+retryButton.hidden=!local || !unverified.length;
+retryButton.textContent='Check saved leads again ('+unverified.length+')';
+retryButton.onclick=async()=>{
+  if(document.documentElement.dataset.hiremateRecheck!=='4'){
+    el('notice').textContent='Reload the HireMate extension in Chrome, then refresh this page.';
+    return;
+  }
+  retrying=true;
+  retryButton.disabled=true;
+  el('browserSearch').disabled=true;
+  const started=Date.now();
+  const previews=new Set(unverified.filter(p=>p.url.startsWith('https://www.linkedin.com/search/')).map(p=>p.id));
+  let checked=0, interrupted=0, next=0, pause="";
+  try {
+    async function checkNext(){
+      while(!pause && next<unverified.length){
+        const index=next++, p=unverified[index];
+        const finished=new Promise(resolve=>{
+          function onFinished(event){
+            if(event.detail?.id!==p.id)return;
+            document.removeEventListener('hiremate-finished',onFinished);
+            resolve(event.detail);
+          }
+          document.addEventListener('hiremate-finished',onFinished);
+        });
+        const {id,url,title,text,published,date_kind,content_kind}=p;
+        document.dispatchEvent(new CustomEvent('hiremate-search',{detail:{target:{id,url,title,text,published,date_kind,content_kind},
+          position:'Lead '+(index+1)+' of '+unverified.length}}));
+        const result=await finished;
+        if(result?.pause)pause=result.pause;
+        if(result?.success){
+          checked++;
+        }else{
+          interrupted++;
+        }
+      }
+    }
+    await Promise.all([checkNext(),checkNext()]);
+    const data=await api('/api/posts');
+    const attempted=new Set(unverified.map(post=>post.id));
+    const stillUnverified=data.posts.filter(post=>attempted.has(post.id) && post.status==='Unverified lead').length;
+    const recovered=data.posts.filter(p=>previews.has(p.id) && !p.url.startsWith('https://www.linkedin.com/search/')).length;
+    el('notice').textContent=checked+' of '+unverified.length+' retry results saved in '+Math.round((Date.now()-started)/1000)+'s. '+
+      recovered+' original links found. '+
+      stillUnverified+' leads still unverified.'+
+      (interrupted?' '+interrupted+' retry results could not be saved.':'')+(pause?' '+pause:' See the details on each lead.');
+  }catch(error){
+    el('notice').textContent=error.message;
+  }finally{
+    retrying=false;
+    retryButton.disabled=false;
+    el('browserSearch').disabled=false;
+  }
+};
 const shared=unverified.length>1 && unverified.every(p=>missingDetails(p)===missingDetails(unverified[0])) && missingDetails(unverified[0]);
 let showedShared=false;
 for(const p of [...data.posts].sort((a,b)=>rank(a)-rank(b))){
@@ -62,7 +118,7 @@ if(p.status==='Unverified lead' && shared && !showedShared){
   add(el('list'),'p','HireMate could read '+unverified.length+' previews. To verify the original posts it still needs '+shared+'.');
   showedShared=true;
 }
-const c=add(el(rank(p)===priority.length?'otherPosts':'list'),'article','');const date=p.published && (p.date_kind==='observed'?'Seen ':'')+p.published;
+const c=add(el(rank(p)===priority.length?'otherPosts':'list'),'article','');const date=p.published && (p.date_kind==='observed'?'Seen ':p.date_kind==='relative'?'Approx. ':'')+p.published;
 add(c,'small',date?p.status+' · '+date:p.status);
 if(p.fit_reason) add(c,'p',p.fit_reason);
 if(p.verification_note) add(c,'p',p.verification_note);
@@ -91,15 +147,32 @@ el('approval').onchange=async()=>{try{await api('/api/preferences/approval',{met
 new MutationObserver(()=>{if(document.documentElement.dataset.hiremateBrowser==='ready') el('browserHint').hidden=true})
 .observe(document.documentElement,{attributes:true,attributeFilter:['data-hiremate-browser']});
 const searchFields=['roles','locations','workplace','employment'];
-function saveSearch(){return api('/api/preferences/search',{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(searchFields.map(k=>[k,el(k).value.trim()])))})}
+function saveSearch(){return api('/api/preferences/search',{signal:AbortSignal.timeout(15000),method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(searchFields.map(k=>[k,el(k).value.trim()])))})}
 bind(el('saveSearch'),async()=>{await saveSearch();return 'Search saved.'});
 document.addEventListener('hiremate-results',()=>refresh().catch(e=>el('notice').textContent=e.message));
-document.addEventListener('hiremate-finished',()=>el('browserSearch').disabled=false);
+let extensionStartTimer;
+let retrying=false;
+document.addEventListener('hiremate-started',()=>{clearTimeout(extensionStartTimer);el('recheck').disabled=true});
+document.addEventListener('hiremate-finished',()=>{
+  clearTimeout(extensionStartTimer);
+  el('browserSearch').disabled=retrying;el('recheck').disabled=retrying;
+});
 el('browserSearch').onclick=async()=>{
   if(document.documentElement.dataset.hiremateBrowser!=='ready'){el('browserHint').hidden=false;el('notice').textContent='This tab cannot see the extension. In desktop Chrome, open '+location.origin+'/ in your LinkedIn profile.';return}
+  if(document.documentElement.dataset.hiremateProgress!=='1'){el('notice').textContent='Reload the HireMate extension in Chrome, then refresh this page to see search progress.';return}
   el('browserSearch').disabled=true;
-  try{const search=await saveSearch();el('notice').textContent='Checking LinkedIn posts…';document.dispatchEvent(new CustomEvent('hiremate-search',{detail:search.url}))}
-  catch(e){el('notice').textContent=e.message;el('browserSearch').disabled=false}
+  el('recheck').disabled=true;
+  el('notice').textContent='Saving your search…';
+  try{
+    const search=await saveSearch();
+    el('notice').textContent='Connecting to the browser…';
+    extensionStartTimer=setTimeout(()=>{
+      el('notice').textContent='The extension did not respond. Refresh HireMate and try again.';
+      el('browserSearch').disabled=false;el('recheck').disabled=false;
+    },3000);
+    document.dispatchEvent(new CustomEvent('hiremate-search',{detail:search.url}));
+  }
+  catch(e){el('notice').textContent=e.message;el('browserSearch').disabled=false;el('recheck').disabled=false}
 };
 bind(el('scan'),async()=>{await saveSearch();const d=await api('/api/scan',{method:'POST',headers});return 'New posts found: '+d.new});
 bind(el('rotate'),async()=>{await api('/api/connection',{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({cookie:el('token').value})});el('token').value='';return 'Connection updated.'});
