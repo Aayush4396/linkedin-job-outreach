@@ -5,10 +5,6 @@ from contextlib import closing
 from . import settings as cfg
 
 
-ROLE = re.compile(
-    r"\b(machine learning|artificial intelligence|model evaluation|language models?|"
-    r"computer vision|gen[ -]?ai|agentic ai|generative ai|deep learning|mlops|nlp|llms?|applied scientist|"
-    r"research engineer|(?:ai|ml)[ /-](?:engineer|researcher|scientist|developer))\b", re.I)
 EMAIL = re.compile(r"[\w.+-]+@[\w.-]+\.[a-z]{2,}\b", re.I)
 
 

@@ -18,4 +18,4 @@ EXTERNAL = os.getenv("EXTERNAL_SCHEDULER", "false").lower() == "true"
 
 WORKER = os.getenv("WORKER_ONLY", "false").lower() == "true"
 LINKEDIN_COOKIE = os.getenv("LINKEDIN_LI_AT_COOKIE", "")
-LINKEDIN_QUERY = os.getenv("LINKEDIN_QUERY", "hiring AI engineer")
+LINKEDIN_QUERY = os.getenv("LINKEDIN_QUERY", "hiring")

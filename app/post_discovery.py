@@ -32,6 +32,11 @@ def linkedin_id(url):
     return next((part for part in match.groups() if part), None) if match else None
 
 
+def application_link(text):
+    link = re.search(r"\b(?:apply|register|submit)\b[^.!?\n]{0,80}?\s*(https?://[^\s<>]+)", text, re.I)
+    return link.group(1).rstrip(".,;:!?)") if link else ""
+
+
 def instructions(post, today=None):
     if post.get("content_kind", "full") != "full" or post.get("date_kind", "published") != "published":
         return "Unverified lead", "", ""
@@ -43,14 +48,14 @@ def instructions(post, today=None):
         return "Outside discovery window", "", ""
     text = post["text"]
     action = (r"(?:apply(?:\s+(?:by|via)\s+email)?\s+(?:at|to)|"
-              r"(?:send|submit|share|email|e-mail|forward)\s+(?:(?:your|a|an|updated|latest)\s+)*"
+              r"(?:send|submit|share|email|e-mail|forward)\s+(?:(?:your|their|a|an|updated|latest)\s+)*"
               r"(?:résumés?|resumes?|cvs?|profiles?|applications?)\s*(?:(?:at|to|via email)\b)?|"
               r"(?:application|applications)\s+(?:email|to))")
     # Match the destination in the application instruction, including the next line.
     email = re.findall(r"\b" + action + r"[\s:–—-]*(" + EMAIL.pattern + ")", text, re.I)
-    link = re.search(r"\b(?:apply|register|submit)\b[^.!?\n]{0,80}?\s*(https?://[^\s<>]+)", text, re.I)
+    link = application_link(text)
     if link:
-        return "Apply via link", "", link.group(1).rstrip(".,;:!?)")
+        return "Apply via link", "", link
     addresses = set(x.lower() for x in email)
     all_emails = set(x.lower() for x in EMAIL.findall(text))
     if len(addresses) == 1 and addresses == all_emails:

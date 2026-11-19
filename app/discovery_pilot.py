@@ -27,7 +27,7 @@ def pilot(fetch):
                     raise RuntimeError("Duplicate or missing records")
                 if run == 1:
                     qualified = {linkedin_id(p["url"]) for p in after if p["status"] in {"Needs draft", "Apply via link"}}
-                    print(f"Recent AI posts with application instructions: {len(qualified)}")
+                    print(f"Recent hiring posts with application instructions: {len(qualified)}")
                 else:
                     return bool(qualified & duplicates)
 

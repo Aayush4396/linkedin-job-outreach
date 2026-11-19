@@ -4,9 +4,24 @@ from unittest.mock import Mock
 
 from app.discovery_pilot import pilot
 from app.post_discovery import instructions
+from app.search import Search
+from urllib.parse import parse_qs, urlsplit
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_saved_filters_in_search_and_import(self):
+        search = Search(roles="GenAI, Generative AI, LLM, data science", locations="india", employment="Full-time")
+        query = parse_qs(urlsplit(search.url()).query)["keywords"][0]
+        self.assertEqual(query, 'hiring ("GenAI" OR "Generative AI" OR "LLM" OR "data science")')
+        self.assertFalse(search.matches(dict(title="Hiring ServiceNow Architect – TSM & Agentic AI", text="India full time")))
+        for text in ("contract in India", "full-time in London"):
+            self.assertFalse(search.matches(dict(title="Hiring Data Science Lead", text=text)))
+        self.assertTrue(search.matches(dict(title="Hiring Data Science Lead", text="Full time in India")))
+        remote = Search(workplace="Remote")
+        self.assertEqual(remote.query(), Search().query())
+        self.assertTrue(remote.matches(dict(title="Hiring", text="Work from home")))
+        self.assertFalse(remote.matches(dict(title="Hiring", text="Onsite only")))
+
     def setUp(self):
         self.post = dict(title="Hiring AI Engineer", published=date.today().isoformat(),
                          text="Send your resume to: hiring@example.org",
@@ -27,6 +42,8 @@ class DiscoveryTests(unittest.TestCase):
 
     def test_application_evidence(self):
         self.assertEqual(instructions(self.post)[:2], ("Needs draft", "hiring@example.org"))
+        invitation = dict(self.post, text="Interested candidates can share their profiles at:\nhiring@example.org")
+        self.assertEqual(instructions(invitation)[:2], ("Needs draft", "hiring@example.org"))
         self.assertEqual(instructions(dict(self.post,text="Register here: https://example.org/jobs/123"))[2],
                          "https://example.org/jobs/123")
         self.assertEqual(instructions(dict(self.post,text="For questions, email team@example.org"))[0],

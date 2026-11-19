@@ -20,8 +20,8 @@ from .resumes import save
 from .storage import all_posts, read, transact
 from .search import Search, saved_search
 from .sources import validate
-from .post_discovery import is_linkedin_search, linkedin_id
-from .store import import_preview
+from .post_discovery import application_link, is_linkedin_search, linkedin_id
+from .store import EMAIL, import_preview
 from .workflow import collect, collect_results, dispatch, prepare, review
 
 
@@ -86,6 +86,10 @@ def dashboard():
 @app.get("/api/posts")
 def posts():
     rows = sorted(all_posts(), key=lambda p: p["published"], reverse=True)
+    for row in rows:
+        if row["status"] == "Unverified lead":
+            row["apply_link"] = application_link(row["text"])
+            row["preview_has_email"] = bool(EMAIL.search(row["text"]))
     today = datetime.now(ZoneInfo(cfg.ZONE)).date().isoformat()
     sent_today = sum(p.get("sent_day") == today for p in rows)
     health = read("settings", "linkedin") or {}
@@ -205,6 +209,7 @@ class BrowserPost(BaseModel):
     published: str = Field(max_length=40)
     date_kind: Literal["published", "observed", "unknown"]
     content_kind: Literal["full", "snippet"]
+    verification_note: str = Field(default="", max_length=240)
 
 
 @app.post("/api/browser-results")
@@ -217,4 +222,7 @@ def browser_results(request: Request, posts: list[BrowserPost]):
     ):
         raise HTTPException(422, "Expected LinkedIn posts or search previews.")
     rows = validate([p.model_dump() for p in posts])
+    for row, post in zip(rows, posts):
+        if post.verification_note:
+            row["verification_note"] = post.verification_note
     return {"new": collect_results(rows, saved_search()), "checked": len(rows)}

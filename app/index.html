@@ -5,7 +5,8 @@
 *{box-sizing:border-box}body{margin:0;background:#f5f6fa;color:#1d2537;font:16px/1.55 system-ui}main{max-width:760px;margin:auto;padding:28px 18px}header,.actions{display:flex;align-items:center;justify-content:space-between;gap:.6rem;flex-wrap:wrap}h1,h2,p{margin:.4em 0}h1{letter-spacing:-.045em}h2{font-size:1.18rem}article,details{background:white;border:1px solid #dadfea;border-radius:14px;padding:18px;margin:12px 0}button{border:0;color:#fff;background:#423499;padding:10px 15px;border-radius:9px;cursor:pointer;font:inherit}button:disabled{opacity:.6}small,summary{color:#51419a}summary{cursor:pointer}label{display:block;margin-top:12px;font-weight:600}input,textarea,select{display:block;width:100%;font:inherit;padding:9px;border-radius:6px;border:1px solid #bcc1d0}textarea{min-height:9em}.actions{justify-content:flex-start;margin-top:10px}.actions button+button{background:#eae9f6;color:#30295c}pre,p{white-space:pre-wrap;overflow-wrap:anywhere}pre{max-height:14rem;overflow:auto}a{color:#443294}
 </style></head><body><main><small>HireMate</small><header><h1>Your outreach</h1><button id="scan">Check for posts</button></header>
 <details><summary>My saved search</summary>
-<label for="roles">Roles or skills (separate with commas)</label><input id="roles" maxlength="240" placeholder="GenAI, machine learning">
+<label for="roles">Roles or skills (separate with commas)</label><input id="roles" maxlength="240" placeholder="Accountant, financial analyst">
+<p>LinkedIn searches for your roles or skills. HireMate checks the details below against each post before matching your résumé.</p>
 <label for="locations">Locations (separate with commas)</label><input id="locations" maxlength="240" placeholder="Any location">
 <label for="workplace">Work arrangement</label><select id="workplace"><option>Any</option><option>Remote</option><option>Hybrid</option><option>Onsite</option></select>
 <label for="employment">Employment type</label><select id="employment"><option>Any</option><option>Contract</option><option>Full-time</option></select>
@@ -13,7 +14,7 @@
 <p id="browserHint" hidden>Open this dashboard in the desktop Chrome profile where you installed HireMate and signed in to LinkedIn. If you are viewing it inside Codex, copy the dashboard address into Chrome.</p></details>
 <p id="mode"></p><p id="counts"></p><details id="connection" hidden><summary id="connectionState">LinkedIn connection</summary><label for="token">New session token</label><input id="token" type="password" autocomplete="off"><button id="rotate">Refresh connection</button></details><label><input style="width:auto;display:inline" type="checkbox" id="approval"> Review new drafts before sending</label><details><summary id="resume">My résumé</summary><pre id="preview"></pre>
 <label for="file">Choose a Word, text, or PDF file</label><input id="file" type="file" accept=".doc,.docx,.txt,.pdf"><button id="upload">Use this résumé</button></details>
-<p role="status" id="notice"></p><section id="list"></section></main><script>
+<p role="status" id="notice"></p><section id="list"></section><details id="others" hidden><summary id="otherCount">Other posts checked</summary><div id="otherPosts"></div></details></main><script>
 const el=id=>document.getElementById(id);
 function add(parent,tag,text){const node=document.createElement(tag);node.textContent=text;parent.append(node);return node}
 async function api(path,options={}){const r=await fetch(path,options);if(!r.ok){let msg='Please try again.';try{const d=await r.json();if(typeof d.detail==='string')msg=d.detail}catch{}throw Error(msg)}return r.json()}
@@ -30,18 +31,53 @@ const local=data.dry && ['localhost','127.0.0.1'].includes(location.hostname);
 el('browserSearch').hidden=!local;
 el('browserHint').hidden=!local || document.documentElement.dataset.hiremateBrowser==='ready';
 el('resume').textContent=data.resume?'My résumé · '+data.resume.name:'Add your résumé';
-el('preview').textContent=data.resume?.text||'';el('list').replaceChildren();
-for(const p of data.posts){const c=add(el('list'),'article','');const date=p.published && (p.date_kind==='observed'?'Seen ':'')+p.published;
-add(c,'small',date?p.status+' · '+date:p.status);
-if(p.status==='Unverified lead'){
+el('preview').textContent=data.resume?.text||'';
+const priority=['Ready for review','Check delivery','Queued','Needs draft','Apply via link','Unverified lead','Check application instructions','Check recipients'];
+const rank=p=>priority.includes(p.status)?priority.indexOf(p.status):priority.length;
+const otherCount=data.posts.filter(p=>rank(p)===priority.length).length;
+el('list').replaceChildren();el('otherPosts').replaceChildren();
+el('others').hidden=!otherCount;el('otherCount').textContent='Other posts checked ('+otherCount+')';
+if(otherCount && otherCount===data.posts.length) add(el('list'),'p','No leads to review yet.');
+const reasons={
+  'Outside target roles':'This post was skipped in an earlier search.',
+  'Outside discovery window':'The publication date falls outside the last 14 days.',
+  'No email listed':'The post has no email address for applications.',
+  'Recipient already seen':'HireMate already has an application for this email address.',
+  'Check application instructions':'An email appears in the post, but the application recipient is unclear.',
+  'Check recipients':'The post lists more than one possible recipient.',
+  'Needs draft':data.resume?'Waiting for a draft.':'Add your résumé to prepare a draft.'
+};
+function missingDetails(p){
   const missing=[];
-  if(p.date_kind && p.date_kind!=='published') missing.push('publication date');
-  if(p.content_kind==='snippet') missing.push('full post text');
-  if(p.url.startsWith('https://www.linkedin.com/search/results/content/')) missing.push('individual post link');
-  if(missing.length) add(c,'p','Could not verify the '+missing.join(' or ')+'. Use the LinkedIn link to review it.');
+  if(p.url.startsWith('https://www.linkedin.com/search/results/content/')) missing.push('a direct post link');
+  if(!p.published || (p.date_kind && p.date_kind!=='published')) missing.push('a confirmed publication date');
+  if(p.content_kind==='snippet') missing.push('confirmation that the text is complete');
+  return missing.join(', ');
+}
+const unverified=data.posts.filter(p=>p.status==='Unverified lead');
+const shared=unverified.length>1 && unverified.every(p=>missingDetails(p)===missingDetails(unverified[0])) && missingDetails(unverified[0]);
+let showedShared=false;
+for(const p of [...data.posts].sort((a,b)=>rank(a)-rank(b))){
+if(p.status==='Unverified lead' && shared && !showedShared){
+  add(el('list'),'p','HireMate could read '+unverified.length+' previews. To verify the original posts it still needs '+shared+'.');
+  showedShared=true;
+}
+const c=add(el(rank(p)===priority.length?'otherPosts':'list'),'article','');const date=p.published && (p.date_kind==='observed'?'Seen ':'')+p.published;
+add(c,'small',date?p.status+' · '+date:p.status);
+if(p.fit_reason) add(c,'p',p.fit_reason);
+if(p.verification_note) add(c,'p',p.verification_note);
+if(reasons[p.status]) add(c,'p',reasons[p.status]);
+if(p.status==='Unverified lead'){
+  if(p.apply_link) {
+    const a=add(c,'a','Open application link from preview');a.href=p.apply_link;
+    a.target='_blank';a.rel='noopener noreferrer';
+  } else if(p.preview_has_email===false) add(c,'p','No email address is visible in this preview.');
+  if(p.preview_has_email) add(c,'p','An email address is visible. HireMate needs the original post to confirm the application instructions.');
+  const missing=missingDetails(p);
+  if(missing && !shared) add(c,'p','To verify the original post, HireMate still needs '+missing+'.');
 }add(c,'h2',p.title);add(c,'p',p.text);
 if(!p.sample){const a=add(c,'a',p.url.startsWith('https://www.linkedin.com/search/results/content/')?'View LinkedIn search':'Original post');a.href=p.url}
-if(p.apply_link){const a=add(c,'a',' Open application');a.href=p.apply_link}
+if(p.apply_link && p.status!=='Unverified lead'){const a=add(c,'a',' Open application');a.href=p.apply_link}
 if(!p.message)continue;
 add(c,'p','To: '+p.recipient+' · Attachment: '+p.filename);
 if(p.status!=='Ready for review'){add(c,'p',p.subject);continue}

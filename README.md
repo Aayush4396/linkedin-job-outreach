@@ -1,6 +1,6 @@
 # HireMate
 
-HireMate discovers AI hiring posts from a configured HTTPS JSON feed, extracts explicit email addresses, and prepares résumé-based email drafts. The phone dashboard lets you upload your résumé, inspect the extracted text, edit a draft, and approve or skip it. Drafts retain their original attachment even if you later replace your résumé.
+HireMate discovers hiring posts for the roles in your saved search from a configured HTTPS JSON feed, extracts explicit email addresses, and prepares résumé-based email drafts. The phone dashboard lets you upload your résumé, inspect the extracted text, edit a draft, and approve or skip it. Drafts retain their original attachment even if you later replace your résumé.
 
 ## Try it locally
 
@@ -54,6 +54,6 @@ Feed records should carry the original publication date and full post text. Mark
 
 ## Saved search and signed-in browser dry run
 
-Open **My saved search** and enter comma-separated role terms and locations. Terms within each field are alternatives. Selected work arrangement and employment type must also appear in the post. Empty fields keep the broad AI filter. **Check for posts** saves the settings and scans the configured server source. Settings apply to incoming results; existing review cards remain in your history.
+Open **My saved search** and enter comma-separated role terms and locations. Terms within each field are alternatives. Selected work arrangement and employment type must also appear in the post. Empty fields leave that part of the search open. HireMate compares the responsibilities and requirements against the uploaded résumé before preparing outreach. In practice mode without a model, the comparison uses shared keywords. **Check for posts** saves the settings and scans the configured server source. Settings apply to incoming results; existing review cards remain in your history.
 
 For an interactive local pilot, open the dashboard in the **same Chrome profile** you use for LinkedIn. In Chrome’s extensions page, enable Developer mode, choose **Load unpacked**, and select this repository’s **browser** folder. Reload the dashboard. With practice mode on, upload a résumé and select **Find posts in my browser**. The extension opens a Posts search, reads identifiable result cards and sends them to the local dashboard. Click back to HireMate to review. Posts with missing dates or visibly truncated text remain unverified. LinkedIn layouts can vary; a page the extension cannot read reports an error. The extension needs no exported cookie. It runs on user request on the computer hosting HireMate; the phone dashboard and Cloud Run worker cannot control that desktop tab.

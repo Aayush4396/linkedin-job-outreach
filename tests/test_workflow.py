@@ -64,7 +64,7 @@ class OutreachTests(unittest.TestCase):
             response = client.post("/api/preferences/search", headers=headers, json=prefs)
             self.assertIn("GenAI", response.json()["url"])
             self.assertEqual(client.get("/api/posts").json()["search"], prefs)
-            client.post("/api/resume",headers=dict(headers, **{"x-filename":"resume.txt"}),content=b"Evaluated RAG pipelines.")
+            client.post("/api/resume",headers=dict(headers, **{"x-filename":"resume.txt"}),content=b"GenAI engineer building RAG pipelines.")
             for expected in (2, 0):
                 result = client.post("/api/browser-results",headers=headers,json=[recruiter,seeker,onsite])
                 self.assertEqual(result.json(), {"new":expected, "checked":3})
@@ -109,7 +109,7 @@ class OutreachTests(unittest.TestCase):
     def test_live_delivery_with_mock_mailbox(self):
         save("cv.txt", b"Language model evaluation")
         source = dict(url="https://example.org/live", published="2026-11-18",
-                      title="ML Engineer", text="Apply by email to hiring@example.org")
+                      title="Model evaluation engineer", text="Apply by email to hiring@example.org")
         workflow.capture(source, False)
         workflow.prepare()
         uid = workflow.key(source["url"])
@@ -139,7 +139,24 @@ class OutreachTests(unittest.TestCase):
         writer.write(output)
         self.assertIn("Language model research", save("resume.pdf",output.getvalue())["text"])
 
+    def test_any_role_filtered_by_resume_before_drafting(self):
+        from app.search import Search
+        search = Search(roles="Accountant, Payroll")
+        transact(lambda get, put: put("settings", "search", search.model_dump()))
+        save("cv.txt", b"Accountant handling reconciliations.")
+        def opening(title):
+            return dict(title=title, text="Send your resume to office@example.org", published="2026-11-17",
+                        url="https://example.org/" + title)
+        workflow.collect_results([opening("Payroll"), opening("Accountant"), opening("Engineer")], search)
+        posts = {p["title"]: p for p in all_posts()}
+        self.assertEqual(set(posts), {"Payroll", "Accountant"})
+        self.assertEqual(posts["Payroll"]["status"], "Low résumé match")
+        self.assertNotIn("message", posts["Payroll"])
+        self.assertEqual(posts["Accountant"]["status"], "Ready for review")
+        self.assertIn("accountant", posts["Accountant"]["fit_reason"])
+
     def test_recipient_duplicate(self):
+        save("cv.txt", b"Language model evaluation")
         workflow.collect()
         workflow.capture(dict(title="AI Engineer",text="Email HIRING@example.org.",url="https://example.org/other",
                               published="2026-11-18"), False)
