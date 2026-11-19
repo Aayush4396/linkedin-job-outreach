@@ -39,7 +39,11 @@ async function checkOriginal(post, tabId) {
   try {
     const response = await fetch(url, {credentials:"include", redirect:"follow", signal:AbortSignal.timeout(5000)});
     const finalUrl = new URL(response.url);
-    if (!response.ok || finalUrl.origin !== url.origin || /^\/(?:authwall|checkpoint|login|uas)(?:\/|$)/.test(finalUrl.pathname)) {
+    if (finalUrl.origin === url.origin && /^\/(?:signup|authwall|checkpoint|login|uas)(?:\/|$)/.test(finalUrl.pathname)) {
+      post.verification_note = "LinkedIn showed a sign-in or sign-up page when HireMate checked the original post.";
+      return;
+    }
+    if (!response.ok || finalUrl.origin !== url.origin) {
       post.verification_note = "LinkedIn did not open the original post for this check.";
       return;
     }
@@ -125,18 +129,22 @@ async function readPosts(allowExpansion=true) {
   const posts = new Map();
   async function menuPermalink(card) {
     const menu = menus.find(button=>card.contains(button));
-    if (!menu || menu.getAttribute("aria-expanded")==="true") return "";
+    if (!menu) return "";
     if (menu.dataset.hiremateLinkChecked) return menu.dataset.hiremateLink || "";
     menu.dataset.hiremateLinkChecked = "true";
     const visibleMenus = () => Array.from(document.querySelectorAll('[role=menu],.artdeco-dropdown__content'))
       .filter(node=>node.getClientRects().length);
     const existing = new Set(visibleMenus());
-    menu.click();
+    const wasOpen = menu.getAttribute("aria-expanded")==="true";
+    if (!wasOpen) menu.click();
     try {
-      for (let i=0; i<5; i++) {
+      for (let i=0; i<12; i++) {
         await new Promise(resolve=>setTimeout(resolve,100));
-        const owned = document.getElementById(menu.getAttribute("aria-controls") || "");
-        const panels = owned ? [owned] : visibleMenus().filter(node=>!existing.has(node));
+        const owned = (menu.getAttribute("aria-controls") || menu.getAttribute("aria-owns") || "")
+          .split(/\s+/).map(id=>document.getElementById(id)).filter(node=>node?.getClientRects().length);
+        const labelled = menu.id ? Array.from(document.querySelectorAll('[aria-labelledby]')).filter(node=>
+          node.getAttribute("aria-labelledby").split(/\s+/).includes(menu.id) && node.getClientRects().length) : [];
+        const panels = owned.length ? owned : labelled.length ? labelled : visibleMenus().filter(node=>!existing.has(node));
         if (panels.length!==1) continue;
         menu.dataset.hiremateCheck = "The post menu opened without a usable link to the original.";
         for (const item of panels[0].querySelectorAll("[data-clipboard-text]")) {
@@ -186,7 +194,7 @@ async function readPosts(allowExpansion=true) {
       }
       return "";
     } finally {
-      if (menu.getAttribute("aria-expanded")==="true" || visibleMenus().some(node=>!existing.has(node))) menu.click();
+      if (!wasOpen && (menu.getAttribute("aria-expanded")==="true" || visibleMenus().some(node=>!existing.has(node)))) menu.click();
     }
   }
   function expandControl(card) {

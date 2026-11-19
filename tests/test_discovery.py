@@ -53,6 +53,75 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(instructions(dict(self.post,published=(date.today()-timedelta(days=30)).isoformat()))[0],
                          "Outside discovery window")
 
+    def test_multi_email_uses_action_target(self):
+        # A post with a general contact email AND a clear apply-to email:
+        # the action-pattern email should win; the footer email must not block it.
+        multi = dict(self.post, text=(
+            "We are hiring an AI Engineer.\n"
+            "For general queries contact info@company.org.\n"
+            "Send your resume to: hiring@example.org"
+        ))
+        self.assertEqual(instructions(multi)[:2], ("Needs draft", "hiring@example.org"))
+        # The action regex captures only the first email after the verb — that is the apply-to address.
+        # Both emails in the same instruction sentence: first one wins (regex stops at first match).
+        both_action = dict(self.post, text=(
+            "Send your resume to hiring@example.org or jobs@example.org"
+        ))
+        self.assertEqual(instructions(both_action)[:2], ("Needs draft", "hiring@example.org"))
+        # Genuinely ambiguous: two separate action sentences pointing to different addresses.
+        two_actions = dict(self.post, text=(
+            "Send your CV to hr@example.org\nOr apply to jobs@example.org"
+        ))
+        self.assertEqual(instructions(two_actions)[0], "Check application instructions")
+
     def test_empty_or_unverified_runs_cannot_pass(self):
         self.assertFalse(pilot(lambda: []))
         self.assertFalse(pilot(lambda: [dict(self.post,content_kind="snippet")]))
+
+    def test_linkedin_scraper_selector_resilience(self):
+        from unittest.mock import MagicMock
+        from app.linkedin import SELECTORS, extract_urn, extract_body, extract_published
+
+        # Verify centralized selectors exist and have fallbacks
+        self.assertIn("cards", SELECTORS)
+        self.assertIn("body", SELECTORS)
+        self.assertIn("time", SELECTORS)
+        self.assertIn("empty", SELECTORS)
+        self.assertGreater(len(SELECTORS["cards"]), 1)
+        self.assertGreater(len(SELECTORS["body"]), 1)
+
+        # URN extraction: primary data-urn
+        card1 = MagicMock()
+        card1.get_attribute.side_effect = lambda k: "urn:li:activity:7123456789012345678" if k == "data-urn" else ""
+        self.assertEqual(extract_urn(card1), "urn:li:activity:7123456789012345678")
+
+        # URN extraction: fallback data-activity-urn
+        card2 = MagicMock()
+        card2.get_attribute.side_effect = lambda k: "urn:li:ugcPost:7123456789012345679" if k == "data-activity-urn" else ""
+        self.assertEqual(extract_urn(card2), "urn:li:ugcPost:7123456789012345679")
+
+        # URN extraction: fallback permalink anchor
+        card3 = MagicMock()
+        card3.get_attribute.return_value = ""
+        link = MagicMock()
+        link.get_attribute.return_value = "https://www.linkedin.com/feed/update/urn:li:share:7123456789012345680/"
+        card3.locator.return_value.all.return_value = [link]
+        self.assertEqual(extract_urn(card3), "urn:li:share:7123456789012345680")
+
+        # Body extraction: primary vs fallback selector
+        card_body = MagicMock()
+        primary_body = MagicMock()
+        primary_body.first.count.return_value = 0
+        fallback_body = MagicMock()
+        fallback_body.first.count.return_value = 1
+        fallback_body.first.inner_text.return_value = "We are hiring an AI Engineer to join our team."
+        card_body.locator.side_effect = lambda sel: fallback_body if "expandable-text" in sel else primary_body
+        self.assertEqual(extract_body(card_body), "We are hiring an AI Engineer to join our team.")
+
+        # Published date extraction
+        card_time = MagicMock()
+        time_node = MagicMock()
+        time_node.count.return_value = 1
+        time_node.get_attribute.return_value = "2026-11-18T10:00:00Z"
+        card_time.locator.return_value.first = time_node
+        self.assertEqual(extract_published(card_time), "2026-11-18")

@@ -50,16 +50,38 @@ def read(group, key):
     return transact(lambda get, put: get(group, key))
 
 
-def all_posts(status=None):
+def iter_posts(status=None):
     if cfg.BUCKET:
         query = cloud().collection("hiremate_posts")
         if status:
             from google.cloud.firestore_v1.base_query import FieldFilter
-            query = query.where(filter=FieldFilter("status", "==", status))
-        return [doc.to_dict() for doc in query.stream()]
+            if isinstance(status, str):
+                query = query.where(filter=FieldFilter("status", "==", status))
+            else:
+                query = query.where(filter=FieldFilter("status", "in", list(status)))
+        for doc in query.stream():
+            yield doc.to_dict()
+        return
+
     transact(lambda get, put: None)
     with closing(sqlite3.connect(cfg.DB)) as db:
         sql = "SELECT value FROM records WHERE kind='posts'"
+        params = ()
         if status:
-            sql += " AND json_extract(value,'$.status')=?"
-        return [json.loads(row[0]) for row in db.execute(sql, (status,) if status else ())]
+            if isinstance(status, str):
+                sql += " AND json_extract(value,'$.status')=?"
+                params = (status,)
+            else:
+                status_list = list(status)
+                if not status_list:
+                    return
+                placeholders = ",".join("?" for _ in status_list)
+                sql += f" AND json_extract(value,'$.status') IN ({placeholders})"
+                params = tuple(status_list)
+        rows = [row[0] for row in db.execute(sql, params).fetchall()]
+    for value in rows:
+        yield json.loads(value)
+
+
+def all_posts(status=None):
+    return list(iter_posts(status))

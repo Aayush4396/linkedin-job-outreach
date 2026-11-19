@@ -58,7 +58,10 @@ def instructions(post, today=None):
         return "Apply via link", "", link
     addresses = set(x.lower() for x in email)
     all_emails = set(x.lower() for x in EMAIL.findall(text))
-    if len(addresses) == 1 and addresses == all_emails:
+    if len(addresses) == 1:
+        # The action pattern identified exactly one reply-to address.
+        # Other emails in the post (e.g. a general contact or company footer)
+        # do not disqualify it — the application instruction is unambiguous.
         return "Needs draft", addresses.pop(), ""
     return ("Check application instructions" if all_emails else "No email listed"), "", ""
 

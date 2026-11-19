@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import mimetypes
 import random
 import re
@@ -16,7 +17,7 @@ from .resumes import attachment
 from .post_discovery import instructions, is_linkedin_search, is_linkedin_url, linkedin_id
 from .search import saved_search
 from .sources import read_posts
-from .storage import all_posts, read, transact
+from .storage import all_posts, iter_posts, read, transact
 from .store import EMAIL
 
 
@@ -170,8 +171,8 @@ def prepare():
         search = saved_search()
         eligible = {"Needs draft", "Apply via link", "No email listed", "Check recipients",
                     "Check application instructions", "Unverified lead", "Low résumé match"}
-        for post in all_posts():
-            if (post["status"] in eligible and post.get("fit_resume") != resume["version"]
+        for post in iter_posts(eligible):
+            if (post.get("fit_resume") != resume["version"]
                     and search.matches(post)):
                 assess(post, resume)
 
@@ -187,21 +188,27 @@ def review(uid, subject, message, action):
 
 
 def dispatch():
+    sent = 0
     for post in sorted(all_posts("Queued"), key=lambda p: p["published"]):
         simulated = cfg.DRY or post["sample"] or post.get("preview", True)
         now = time.time()
         day = datetime.fromtimestamp(now, ZoneInfo(cfg.ZONE)).date().isoformat()
         def claim(get, put):
-            item = get("posts", post["id"])
             clock = get("settings", "delivery") or {}
             used = clock.get("used", 0) if clock.get("day") == day else 0
-            if item["status"] != "Queued" or used >= cfg.CAP or now < clock.get("next", 0):
-                return False
+            if used >= cfg.CAP or now < clock.get("next", 0):
+                return "blocked"
+            item = get("posts", post["id"])
+            if not item or item["status"] != "Queued":
+                return "skip"
             put("settings", "delivery", {"used": used + 1, "day": day, "next": now + random.randint(120,360)})
             item["status"] = "Simulated" if simulated else "Check delivery"
             put("posts", item["id"], item)
-            return True
-        if not transact(claim):
+            return "claimed"
+        status = transact(claim)
+        if status == "blocked":
+            break
+        if status != "claimed":
             continue
         if not simulated:
             msg = EmailMessage()
@@ -210,10 +217,26 @@ def dispatch():
             mime = mimetypes.guess_type(post["filename"])[0] or "application/octet-stream"
             major, minor = mime.split("/", 1)
             msg.add_attachment(attachment(post["resume"]), maintype=major, subtype=minor, filename=post["filename"])
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context(), timeout=30) as smtp:
-                smtp.login(cfg.ADDRESS, cfg.PASSWORD)
-                smtp.send_message(msg)
-            transact(lambda get, put: put("posts", post["id"], dict(post, status="Sent", sent_day=day)))
-        return 1
-    return 0
+            delivered = False
+            for attempt in range(3):
+                try:
+                    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context(), timeout=30) as smtp:
+                        smtp.login(cfg.ADDRESS, cfg.PASSWORD)
+                        smtp.send_message(msg)
+                    delivered = True
+                    break
+                except smtplib.SMTPAuthenticationError as exc:
+                    logging.error("SMTP authentication failed for %s: %s", cfg.ADDRESS, exc)
+                    break
+                except (smtplib.SMTPException, OSError) as exc:
+                    logging.warning("SMTP delivery attempt %d failed for post %s: %s", attempt + 1, post["id"], exc)
+                    if attempt < 2:
+                        time.sleep(2 * (attempt + 1))
+            if delivered:
+                transact(lambda get, put: put("posts", post["id"], dict(post, status="Sent", sent_day=day)))
+            else:
+                logging.error("Delivery failed for post %s; left as Check delivery", post["id"])
+                break
+        sent += 1
+    return sent
 

@@ -100,6 +100,20 @@ class OutreachTests(unittest.TestCase):
             self.assertEqual(workflow.dispatch(), 0)
         self.assertEqual(sum(p["status"]=="Simulated" for p in all_posts()),20)
 
+    def test_dispatch_throughput_multiple_when_spacing_allows(self):
+        # When time elapses during a dispatch run (e.g. SMTP operations or multiple slots),
+        # dispatch() should process all eligible posts in a single run instead of stopping at 1.
+        for i in range(3):
+            uid = f"tp-{i}"
+            post = dict(id=uid, published=f"2026-11-{10+i}", status="Queued", sample=True)
+            transact(lambda get, put: put("posts", uid, post))
+        # Provide clock values: 0s for post 0, 400s for post 1, 800s for post 2
+        times = iter([1_800_000_000, 1_800_000_400, 1_800_000_800, 1_800_000_800])
+        with patch("app.workflow.time.time", side_effect=lambda: next(times)):
+            processed = workflow.dispatch()
+            self.assertEqual(processed, 3)
+        self.assertEqual(sum(p["status"] == "Simulated" for p in all_posts() if p["id"].startswith("tp-")), 3)
+
     def test_word_text(self):
         output = io.BytesIO()
         with zipfile.ZipFile(output,"w") as doc:
@@ -123,6 +137,52 @@ class OutreachTests(unittest.TestCase):
             self.assertEqual(next(message.iter_attachments()).get_payload(decode=True), b"Language model evaluation")
             self.assertEqual(read("posts",uid)["status"], "Sent")
             self.assertEqual(workflow.dispatch(), 0)
+
+    def test_live_delivery_transient_error_retries_and_succeeds(self):
+        import smtplib
+        save("cv.txt", b"Language model evaluation")
+        source = dict(url="https://example.org/retry-live", published="2026-11-18",
+                      title="Model evaluation engineer", text="Apply by email to retry@example.org")
+        workflow.capture(source, False)
+        workflow.prepare()
+        uid = workflow.key(source["url"])
+        workflow.review(uid, "Application", "Reviewed pitch", "approve")
+        transact(lambda get, put: put("posts", uid, dict(get("posts", uid), preview=False)))
+
+        # First connection attempt fails with SMTPServerDisconnected, second succeeds
+        mock_smtp = patch("smtplib.SMTP_SSL")
+        mock_sleep = patch("app.workflow.time.sleep")
+        with patch.multiple(cfg, DRY=False, ADDRESS="sender@example.org", PASSWORD="test"), \
+             mock_smtp as smtp_cls, mock_sleep as sleep_mock:
+            good_smtp = unittest.mock.MagicMock()
+            smtp_cls.side_effect = [smtplib.SMTPServerDisconnected("Temporary glitch"), good_smtp]
+            processed = workflow.dispatch()
+            self.assertEqual(processed, 1)
+            self.assertEqual(read("posts", uid)["status"], "Sent")
+            self.assertEqual(smtp_cls.call_count, 2)
+            sleep_mock.assert_called_once_with(2)
+
+    def test_live_delivery_exhausted_retries_remains_check_delivery(self):
+        import smtplib
+        save("cv.txt", b"Language model evaluation")
+        source = dict(url="https://example.org/fail-live", published="2026-11-18",
+                      title="Model evaluation engineer", text="Apply by email to fail@example.org")
+        workflow.capture(source, False)
+        workflow.prepare()
+        uid = workflow.key(source["url"])
+        workflow.review(uid, "Application", "Reviewed pitch", "approve")
+        transact(lambda get, put: put("posts", uid, dict(get("posts", uid), preview=False)))
+
+        mock_smtp = patch("smtplib.SMTP_SSL")
+        mock_sleep = patch("app.workflow.time.sleep")
+        with patch.multiple(cfg, DRY=False, ADDRESS="sender@example.org", PASSWORD="test"), \
+             mock_smtp as smtp_cls, mock_sleep as sleep_mock:
+            smtp_cls.side_effect = smtplib.SMTPConnectError(421, b"Service unavailable")
+            processed = workflow.dispatch()
+            self.assertEqual(processed, 0)
+            self.assertEqual(read("posts", uid)["status"], "Check delivery")
+            self.assertEqual(smtp_cls.call_count, 3)
+            self.assertEqual(sleep_mock.call_count, 2)
 
     def test_pdf_text(self):
         from pypdf import PdfWriter
@@ -161,6 +221,38 @@ class OutreachTests(unittest.TestCase):
         workflow.capture(dict(title="AI Engineer",text="Email HIRING@example.org.",url="https://example.org/other",
                               published="2026-11-18"), False)
         self.assertEqual(read("posts",workflow.key("https://example.org/other"))["status"], "Recipient already seen")
+
+    def test_iter_posts_and_filtering(self):
+        from app.storage import iter_posts
+        # Insert posts with different statuses
+        posts_data = [
+            dict(id="s1", status="Needs draft", title="Job 1"),
+            dict(id="s2", status="Sent", title="Job 2"),
+            dict(id="s3", status="Apply via link", title="Job 3"),
+            dict(id="s4", status="Simulated", title="Job 4"),
+        ]
+        for p in posts_data:
+            transact(lambda get, put, item=p: put("posts", item["id"], item))
+
+        # Test streaming generator behavior
+        stream = iter_posts()
+        import types
+        self.assertIsInstance(stream, types.GeneratorType)
+        all_streamed = list(stream)
+        self.assertEqual(len(all_streamed), 4)
+
+        # Single string filter
+        sent_posts = list(iter_posts("Sent"))
+        self.assertEqual(len(sent_posts), 1)
+        self.assertEqual(sent_posts[0]["title"], "Job 2")
+
+        # Set / collection filter
+        eligible_posts = list(iter_posts({"Needs draft", "Apply via link"}))
+        self.assertEqual(len(eligible_posts), 2)
+        self.assertEqual({p["title"] for p in eligible_posts}, {"Job 1", "Job 3"})
+
+        # all_posts backward compatibility
+        self.assertEqual(len(all_posts({"Sent", "Simulated"})), 2)
 
 
 class ConfigurationTests(unittest.TestCase):
