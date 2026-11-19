@@ -6,6 +6,17 @@ from urllib.parse import urlencode, urlsplit
 
 from playwright.sync_api import sync_playwright
 
+__all__ = [
+    "SELECTORS",
+    "collect_posts",
+    "current_cookie",
+    "extract_body",
+    "extract_published",
+    "extract_urn",
+    "find_cards",
+    "rotate_cookie",
+]
+
 SELECTORS = {
     "cards": [
         "[data-urn^='urn:li:activity:'], [data-urn^='urn:li:ugcPost:'], [data-urn^='urn:li:share:']",

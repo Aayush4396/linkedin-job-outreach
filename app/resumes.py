@@ -7,6 +7,11 @@ from pathlib import Path
 from . import settings as cfg
 from .storage import transact
 
+__all__ = [
+    "attachment",
+    "save",
+]
+
 
 def command(args):
     subprocess.run(args, check=True, timeout=60, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

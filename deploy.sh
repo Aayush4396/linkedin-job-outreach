@@ -26,7 +26,7 @@ secret() {
   local key=$1 id="hiremate-${1,,}" value
   if ! gcloud secrets describe "$id" >/dev/null 2>&1; then
     value=${!key:-}
-    if [[ -z "$value" ]]; then read -rsp "Enter $key: " value; echo; fi
+    if [[ -z "$value" && -t 0 ]]; then read -rsp "Enter $key: " value; echo; fi
     [[ -n "$value" ]] || { echo "Missing $key" >&2; exit 1; }
     printf %s "$value" | gcloud secrets create "$id" --data-file=- --replication-policy=automatic
   fi
@@ -38,11 +38,12 @@ if [[ "${POST_SOURCE:-feed}" == linkedin ]]; then
   secret LINKEDIN_LI_AT_COOKIE
   gcloud secrets add-iam-policy-binding hiremate-linkedin_li_at_cookie --member="serviceAccount:$runtime" --role=roles/secretmanager.secretVersionAdder --quiet >/dev/null
 else
+  POST_FEED_URL=${FEED_URL:-${POST_FEED_URL:-}}
   secret POST_FEED_URL
 fi
 if [[ "$dry" == false ]]; then secret GMAIL_ADDRESS; secret GMAIL_APP_PASSWORD; fi
 secret_args=$(IFS=,; echo "${secrets[*]}")
-envs="LINKEDIN_QUERY=${LINKEDIN_QUERY:-hiring},GCP_PROJECT=$project,GCP_REGION=$region,RESUME_BUCKET=$bucket,GEMINI_MODEL=$model,DATABASE_PATH=/tmp/hiremate.sqlite3,SCAN_INTERVAL_MINUTES=480,EXTERNAL_SCHEDULER=true,APPROVAL_MODE=$approval,DRY_RUN=$dry,MAX_EMAILS_PER_DAY=${MAX_EMAILS_PER_DAY:-20},OUTREACH_TIMEZONE=$zone,GEMINI_WORKERS=${GEMINI_WORKERS:-4},FEED_AUTH_HEADER=${FEED_AUTH_HEADER:-}"
+envs="LINKEDIN_QUERY=${LINKEDIN_QUERY:-hiring},GCP_PROJECT=$project,GCP_REGION=$region,RESUME_BUCKET=$bucket,GEMINI_MODEL=$model,DATABASE_PATH=/tmp/hiremate.sqlite3,SCAN_INTERVAL_MINUTES=${SCAN_INTERVAL_MINUTES:-480},SCAN_COOLDOWN_MINUTES=${SCAN_COOLDOWN_MINUTES:-${SCAN_INTERVAL_MINUTES:-480}},EXTERNAL_SCHEDULER=true,APPROVAL_MODE=$approval,DRY_RUN=$dry,MAX_EMAILS_PER_DAY=${MAX_EMAILS_PER_DAY:-20},OUTREACH_TIMEZONE=$zone,GEMINI_WORKERS=${GEMINI_WORKERS:-4},FEED_AUTH_HEADER=${FEED_AUTH_HEADER:-}"
 common=(--region="$region" --service-account="$runtime" --memory=2Gi --cpu=1 --min-instances=0 --max-instances=1 --set-secrets="$secret_args" --timeout=900 --quiet)
 gcloud run deploy hiremate --source=. "${common[@]}" --set-env-vars="$envs,WORKER_ONLY=false" --allow-unauthenticated
 image=$(gcloud run services describe hiremate --region="$region" --format='value(spec.template.spec.containers[0].image)')

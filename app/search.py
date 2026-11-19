@@ -7,6 +7,11 @@ from pydantic import BaseModel, Field
 from . import settings as cfg
 from .storage import read
 
+__all__ = [
+    "Search",
+    "saved_search",
+]
+
 
 CHOICE_TERMS = {
     "Remote": ("remote", "work from home"),

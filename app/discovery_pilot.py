@@ -9,6 +9,11 @@ from .sources import read_posts
 from .storage import all_posts
 from .workflow import capture
 
+__all__ = [
+    "pilot",
+    "main",
+]
+
 
 def pilot(fetch):
     with tempfile.TemporaryDirectory() as folder:

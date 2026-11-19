@@ -8,6 +8,11 @@ from urllib.request import Request, urlopen
 from . import settings as cfg
 from .post_discovery import linkedin_id
 
+__all__ = [
+    "read_posts",
+    "validate",
+]
+
 
 def read_posts(feed_url):
     if feed_url:

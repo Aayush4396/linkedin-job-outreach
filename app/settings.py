@@ -1,9 +1,34 @@
 import os
 
+__all__ = [
+    "ADDRESS",
+    "APPROVAL",
+    "BUCKET",
+    "CAP",
+    "DB",
+    "DRY",
+    "EXTERNAL",
+    "FEED",
+    "FEED_AUTH_HEADER",
+    "GEMINI_WORKERS",
+    "INTERVAL",
+    "LINKEDIN_COOKIE",
+    "LINKEDIN_QUERY",
+    "MODEL",
+    "PASSWORD",
+    "PIN",
+    "PROJECT",
+    "REGION",
+    "SCAN_COOLDOWN",
+    "WORKER",
+    "ZONE",
+]
+
 DB = os.getenv("DATABASE_PATH", "hiremate.sqlite3")
 FEED = os.getenv("POST_FEED_URL", "")
 FEED_AUTH_HEADER = os.getenv("FEED_AUTH_HEADER", "")
 INTERVAL = int(os.getenv("SCAN_INTERVAL_MINUTES", "480"))
+SCAN_COOLDOWN = max(1, int(os.getenv("SCAN_COOLDOWN_MINUTES") or INTERVAL))
 PROJECT = os.getenv("GCP_PROJECT", "")
 REGION = os.getenv("GCP_REGION", "us-central1")
 MODEL = os.getenv("GEMINI_MODEL", "")

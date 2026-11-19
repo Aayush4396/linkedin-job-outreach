@@ -4,6 +4,11 @@ from contextlib import closing
 
 from . import settings as cfg
 
+__all__ = [
+    "EMAIL",
+    "import_preview",
+]
+
 
 EMAIL = re.compile(r"[\w.+-]+@[\w.-]+\.[a-z]{2,}\b", re.I)
 

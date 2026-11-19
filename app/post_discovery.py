@@ -5,6 +5,14 @@ from urllib.parse import parse_qs, urlsplit
 
 from .store import EMAIL
 
+__all__ = [
+    "application_link",
+    "instructions",
+    "is_linkedin_search",
+    "is_linkedin_url",
+    "linkedin_id",
+]
+
 
 def is_linkedin_url(url):
     host = urlsplit(url).hostname or ""

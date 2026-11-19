@@ -23,7 +23,14 @@ from .search import Search, saved_search
 from .sources import validate
 from .post_discovery import application_link, is_linkedin_search, linkedin_id
 from .store import EMAIL, import_preview
-from .workflow import collect, collect_results, dispatch, prepare, review
+from .workflow import claim_manual_scan, collect, collect_results, dispatch, prepare, review
+
+__all__ = [
+    "app",
+    "CloudJsonFormatter",
+    "repeat",
+    "setup_logging",
+]
 
 
 class CloudJsonFormatter(logging.Formatter):
@@ -135,6 +142,10 @@ def posts():
 
 @app.post("/api/scan")
 def scan_now():
+    retry_after = claim_manual_scan()
+    if retry_after:
+        raise HTTPException(429, f"Please try again in {retry_after} seconds.",
+                            headers={"Retry-After": str(retry_after)})
     try:
         return {"new": collect()}
     except Exception as exc:

@@ -4,6 +4,7 @@
   "description": "Run a search from your local HireMate dashboard and review visible LinkedIn posts.",
   "version": "0.1.8",
   "permissions": ["scripting"],
+  "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'none';"},
   "host_permissions": ["https://www.linkedin.com/*"],
   "background": {"service_worker": "worker.js"},
   "content_scripts": [{

@@ -1,0 +1,28 @@
+name: Runtime smoke test
+on:
+  push:
+    branches: [verify/runtime-smoke]
+permissions:
+  contents: read
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build candidate
+        run: docker build -t hiremate:candidate .
+      - name: Exercise Chromium, Word conversion and scanned PDF OCR
+        run: docker run --rm -i hiremate:candidate python3 - < tests/runtime_smoke.py
+      - name: Verify service startup
+        run: |
+          docker run -d --name preview -p 127.0.0.1:8766:8080 -e EXTERNAL_SCHEDULER=true hiremate:candidate
+          curl --fail --retry 15 --retry-connrefused --retry-delay 1 http://127.0.0.1:8766/api/posts > /dev/null
+      - name: Measure against the previous runtime
+        run: |
+          mkdir -p "$RUNNER_TEMP/previous"
+          git archive 32c40ca | tar -x -C "$RUNNER_TEMP/previous"
+          docker build -t hiremate:previous "$RUNNER_TEMP/previous"
+          docker image inspect hiremate:previous hiremate:candidate --format '{{index .RepoTags 0}} {{.Size}} bytes' | tee -a "$GITHUB_STEP_SUMMARY"

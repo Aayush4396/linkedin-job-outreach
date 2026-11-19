@@ -47,8 +47,52 @@ class OutreachTests(unittest.TestCase):
                 self.assertEqual(workflow.dispatch(), 1)
                 self.assertEqual(workflow.dispatch(), 0)
             self.assertEqual(read("posts", post["id"])["status"], "Simulated")
-            self.assertEqual(client.post("/api/scan", headers=headers).json()["new"], 0)
+            self.assertEqual(client.post("/api/scan", headers=headers).status_code, 429)
             self.assertEqual(len(all_posts()), 3)
+
+    def test_assess_discards_result_if_resume_changed_during_generation(self):
+        post = dict(id="p", title="Payroll", text="Hiring", status="Needs draft", recipient="jobs@example.org")
+        resume = dict(version="old", name="cv.txt", text="Payroll")
+        def transaction(operation):
+            from unittest.mock import Mock
+            put = Mock()
+            records = {("posts", "p"): post, ("settings", "resume"): {"version": "replacement"}}
+            operation(lambda group, key: records[(group, key)], put)
+            put.assert_not_called()
+        fit = workflow.ResumeFit(relevant=True, reason="Payroll experience")
+        pitch = workflow.Pitch(subject="Application", body="My experience matches.")
+        with patch.object(cfg, "MODEL", "test-model"), patch.object(workflow, "generate", side_effect=[fit, pitch]) as model, \
+             patch.object(workflow, "transact", side_effect=transaction) as storage:
+            workflow.assess(post, resume)
+            self.assertEqual(model.call_count, 2)
+            storage.assert_called_once()
+
+    def test_manual_scan_cooldown_after_failure_and_at_expiry(self):
+        with TestClient(app) as client, patch.object(cfg, "SCAN_COOLDOWN", 2), \
+             patch("app.main.collect", side_effect=[ValueError("feed unavailable"), 3]) as collect, \
+             patch("app.workflow.time.time") as clock:
+            headers = {"x-hiremate": "1"}
+            clock.return_value = 1000
+            self.assertEqual(client.post("/api/scan", headers=headers).status_code, 502)
+            clock.return_value = 1119.5
+            response = client.post("/api/scan", headers=headers)
+            self.assertEqual(response.status_code, 429)
+            self.assertEqual(response.headers["Retry-After"], "1")
+            clock.return_value = 1120
+            self.assertEqual(client.post("/api/scan", headers=headers).json(), {"new": 3})
+            self.assertEqual(collect.call_count, 2)
+
+    def test_simultaneous_manual_scans_share_one_reservation(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        start = Barrier(4)
+        def claim(_):
+            start.wait(timeout=10)
+            return workflow.claim_manual_scan()
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            delays = list(pool.map(claim, range(4)))
+        self.assertEqual(delays.count(0), 1)
+        self.assertTrue(all(delay >= 0 for delay in delays))
 
     def test_saved_search_browser_to_draft(self):
         from datetime import date

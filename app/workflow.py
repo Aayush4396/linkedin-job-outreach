@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import mimetypes
+import math
 import random
 import re
 import smtplib
@@ -20,6 +21,18 @@ from .search import saved_search
 from .sources import read_posts
 from .storage import all_posts, iter_posts, read, transact
 from .store import EMAIL
+
+__all__ = [
+    "assess",
+    "capture",
+    "claim_manual_scan",
+    "collect",
+    "collect_results",
+    "dispatch",
+    "key",
+    "prepare",
+    "review",
+]
 
 
 def key(value):
@@ -138,6 +151,20 @@ def assess(post, resume):
         current.update(status=status, route=route, fit_reason=fit.reason, fit_resume=resume["version"])
         put("posts", post["id"], current)
     transact(persist)
+
+
+def claim_manual_scan():
+    """Reserve a manual scan before external work. Return seconds to retry if busy."""
+    def claim(get, put):
+        previous = get("settings", "manual_scan")
+        now = time.time()
+        if previous:
+            remaining = math.ceil(previous["started"] + cfg.SCAN_COOLDOWN * 60 - now)
+            if remaining > 0:
+                return remaining
+        put("settings", "manual_scan", {"started": now})
+        return 0
+    return transact(claim)
 
 
 def collect():
