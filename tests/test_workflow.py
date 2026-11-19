@@ -254,6 +254,96 @@ class OutreachTests(unittest.TestCase):
         # all_posts backward compatibility
         self.assertEqual(len(all_posts({"Sent", "Simulated"})), 2)
 
+    def test_parallel_prepare(self):
+        save("cv.txt", b"Machine learning engineer")
+        for i in range(4):
+            uid = f"par-{i}"
+            post = dict(id=uid, title=f"ML Engineer {i}", text=f"Hiring machine learning. Send resume to ml{i}@example.org",
+                        published="2026-11-18", status="Needs draft", recipient=f"ml{i}@example.org", sample=False)
+            transact(lambda get, put, item=post: put("posts", item["id"], item))
+
+        with patch.object(cfg, "GEMINI_WORKERS", 4):
+            workflow.prepare()
+
+        assessed = [read("posts", f"par-{i}") for i in range(4)]
+        for p in assessed:
+            self.assertEqual(p["status"], "Ready for review")
+            self.assertIn("learning", p["fit_reason"])
+
+    def test_repeat_logs_exception_traceback(self):
+        import asyncio
+        from app.main import repeat
+
+        def failing():
+            raise RuntimeError("Database connection lost")
+
+        async def run_one():
+            with patch("logging.exception") as log_mock, patch("asyncio.sleep", side_effect=asyncio.CancelledError):
+                try:
+                    await repeat(failing, 1)
+                except asyncio.CancelledError:
+                    pass
+                log_mock.assert_called_once_with("Background %s failed", "failing")
+
+        asyncio.run(run_one())
+
+    def test_structured_json_logging_cloud_format(self):
+        import json
+        import logging
+        from app.main import CloudJsonFormatter, setup_logging
+
+        formatter = CloudJsonFormatter()
+        record = logging.LogRecord("hiremate.worker", logging.WARNING, "worker.py", 42,
+                                   "Rate limit spacing: wait %d seconds", (180,), None)
+        out = formatter.format(record)
+        data = json.loads(out)
+        self.assertEqual(data["severity"], "WARNING")
+        self.assertEqual(data["message"], "Rate limit spacing: wait 180 seconds")
+        self.assertEqual(data["logger"], "hiremate.worker")
+        self.assertIn("T", data["time"])
+
+        # Test exception formatting in JSON
+        try:
+            raise ValueError("Test error for traceback")
+        except ValueError:
+            import sys
+            exc_record = logging.LogRecord("hiremate.worker", logging.ERROR, "worker.py", 50,
+                                           "Task failed", (), sys.exc_info())
+            exc_out = formatter.format(exc_record)
+            exc_data = json.loads(exc_out)
+            self.assertEqual(exc_data["severity"], "ERROR")
+            self.assertIn("ValueError: Test error for traceback", exc_data["exception"])
+            self.assertIn("ValueError: Test error for traceback", exc_data["message"])
+
+        # Test setup_logging applies formatter when BUCKET is set
+        with patch.object(cfg, "BUCKET", "my-test-bucket"):
+            setup_logging()
+            root = logging.getLogger()
+            self.assertTrue(any(isinstance(h.formatter, CloudJsonFormatter) for h in root.handlers))
+
+    def test_feed_authorization_header(self):
+        from unittest.mock import MagicMock
+        from app.sources import read_posts
+
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'[{"url":"https://example.org/p1","title":"Dev","text":"Hiring dev","published":"2026-11-18"}]'
+        mock_response.__enter__.return_value = mock_response
+
+        # With auth header
+        with patch.object(cfg, "FEED_AUTH_HEADER", "Bearer secret-token-123"), \
+             patch("app.sources.urlopen", return_value=mock_response) as mock_urlopen:
+            posts = read_posts("https://feed.example.org/jobs")
+            self.assertEqual(len(posts), 1)
+            req = mock_urlopen.call_args[0][0]
+            self.assertEqual(req.get_header("Authorization"), "Bearer secret-token-123")
+
+        # Without auth header
+        with patch.object(cfg, "FEED_AUTH_HEADER", ""), \
+             patch("app.sources.urlopen", return_value=mock_response) as mock_urlopen:
+            read_posts("https://feed.example.org/jobs")
+            req = mock_urlopen.call_args[0][0]
+            self.assertFalse(req.has_header("Authorization"))
+
 
 class ConfigurationTests(unittest.TestCase):
     def test_environment_wiring(self):

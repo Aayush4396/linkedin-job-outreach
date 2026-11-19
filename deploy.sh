@@ -42,7 +42,7 @@ else
 fi
 if [[ "$dry" == false ]]; then secret GMAIL_ADDRESS; secret GMAIL_APP_PASSWORD; fi
 secret_args=$(IFS=,; echo "${secrets[*]}")
-envs="LINKEDIN_QUERY=${LINKEDIN_QUERY:-hiring},GCP_PROJECT=$project,GCP_REGION=$region,RESUME_BUCKET=$bucket,GEMINI_MODEL=$model,DATABASE_PATH=/tmp/hiremate.sqlite3,SCAN_INTERVAL_MINUTES=480,EXTERNAL_SCHEDULER=true,APPROVAL_MODE=$approval,DRY_RUN=$dry,MAX_EMAILS_PER_DAY=${MAX_EMAILS_PER_DAY:-20},OUTREACH_TIMEZONE=$zone"
+envs="LINKEDIN_QUERY=${LINKEDIN_QUERY:-hiring},GCP_PROJECT=$project,GCP_REGION=$region,RESUME_BUCKET=$bucket,GEMINI_MODEL=$model,DATABASE_PATH=/tmp/hiremate.sqlite3,SCAN_INTERVAL_MINUTES=480,EXTERNAL_SCHEDULER=true,APPROVAL_MODE=$approval,DRY_RUN=$dry,MAX_EMAILS_PER_DAY=${MAX_EMAILS_PER_DAY:-20},OUTREACH_TIMEZONE=$zone,GEMINI_WORKERS=${GEMINI_WORKERS:-4},FEED_AUTH_HEADER=${FEED_AUTH_HEADER:-}"
 common=(--region="$region" --service-account="$runtime" --memory=2Gi --cpu=1 --min-instances=0 --max-instances=1 --set-secrets="$secret_args" --timeout=900 --quiet)
 gcloud run deploy hiremate --source=. "${common[@]}" --set-env-vars="$envs,WORKER_ONLY=false" --allow-unauthenticated
 image=$(gcloud run services describe hiremate --region="$region" --format='value(spec.template.spec.containers[0].image)')

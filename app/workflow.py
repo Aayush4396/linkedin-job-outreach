@@ -6,6 +6,7 @@ import re
 import smtplib
 import ssl
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
@@ -167,14 +168,26 @@ def collect_results(posts, search, sample=False):
 
 def prepare():
     resume = read("settings", "resume")
-    if resume:
-        search = saved_search()
-        eligible = {"Needs draft", "Apply via link", "No email listed", "Check recipients",
-                    "Check application instructions", "Unverified lead", "Low résumé match"}
-        for post in iter_posts(eligible):
-            if (post.get("fit_resume") != resume["version"]
-                    and search.matches(post)):
-                assess(post, resume)
+    if not resume:
+        return
+    search = saved_search()
+    eligible = {"Needs draft", "Apply via link", "No email listed", "Check recipients",
+                "Check application instructions", "Unverified lead", "Low résumé match"}
+    candidates = [
+        post for post in iter_posts(eligible)
+        if post.get("fit_resume") != resume["version"] and search.matches(post)
+    ]
+    if not candidates:
+        return
+    workers = min(len(candidates), cfg.GEMINI_WORKERS)
+    if workers <= 1:
+        for post in candidates:
+            assess(post, resume)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(assess, post, resume) for post in candidates]
+            for future in futures:
+                future.result()
 
 
 def review(uid, subject, message, action):

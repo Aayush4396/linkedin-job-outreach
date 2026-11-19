@@ -1,9 +1,10 @@
 import asyncio
 import base64
+import json
 import logging
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import secrets
 from contextlib import asynccontextmanager
@@ -25,17 +26,50 @@ from .store import EMAIL, import_preview
 from .workflow import collect, collect_results, dispatch, prepare, review
 
 
+class CloudJsonFormatter(logging.Formatter):
+    SEVERITY_MAP = {
+        logging.DEBUG: "DEBUG",
+        logging.INFO: "INFO",
+        logging.WARNING: "WARNING",
+        logging.ERROR: "ERROR",
+        logging.CRITICAL: "CRITICAL",
+    }
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "severity": self.SEVERITY_MAP.get(record.levelno, "DEFAULT"),
+            "message": record.getMessage(),
+            "time": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "logger": record.name,
+        }
+        if record.exc_info:
+            exc = self.formatException(record.exc_info)
+            payload["exception"] = exc
+            payload["message"] = payload["message"] + "\n" + exc
+        return json.dumps(payload)
+
+
+def setup_logging():
+    if cfg.BUCKET:
+        handler = logging.StreamHandler()
+        handler.setFormatter(CloudJsonFormatter())
+        root_logger = logging.getLogger()
+        root_logger.handlers = [handler]
+        root_logger.setLevel(logging.INFO)
+
+
 async def repeat(function, seconds):
     while True:
         try:
             await asyncio.to_thread(function)
         except Exception:
-            logging.error("Background %s failed", function.__name__)
+            logging.exception("Background %s failed", function.__name__)
         await asyncio.sleep(seconds)
 
 
 @asynccontextmanager
 async def lifespan(app):
+    setup_logging()
     if cfg.INTERVAL < 1 or (cfg.BUCKET and not cfg.PIN):
         raise ValueError("Check the scan interval and dashboard credentials")
     if not cfg.DRY and not all((cfg.MODEL, cfg.FEED or cfg.LINKEDIN_COOKIE, cfg.ADDRESS, cfg.PASSWORD, cfg.PIN)):

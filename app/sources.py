@@ -3,8 +3,9 @@ import json
 from datetime import date
 from pathlib import Path
 from urllib.parse import urlsplit
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
+from . import settings as cfg
 from .post_discovery import linkedin_id
 
 
@@ -12,7 +13,11 @@ def read_posts(feed_url):
     if feed_url:
         if urlsplit(feed_url).scheme != "https":
             raise ValueError("Feed URL must use HTTPS")
-        with urlopen(feed_url, timeout=15) as response:
+        headers = {"User-Agent": "HireMate/1.0"}
+        if cfg.FEED_AUTH_HEADER:
+            headers["Authorization"] = cfg.FEED_AUTH_HEADER
+        req = Request(feed_url, headers=headers)
+        with urlopen(req, timeout=15) as response:
             raw = response.read(2_000_001)
         if len(raw) > 2_000_000:
             raise ValueError("Feed exceeds size limit")
