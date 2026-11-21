@@ -12,6 +12,7 @@ from datetime import datetime
 from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
 from threading import Lock
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
@@ -32,6 +33,7 @@ __all__ = [
     "collect_results",
     "dispatch",
     "key",
+    "fit_is_current",
     "prepare",
     "review",
 ]
@@ -41,7 +43,7 @@ def key(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def capture(post, sample):
+def capture(post, sample, scan_id=None):
     post = post.copy()
     preview_text = post.pop("preview_text", "")
     search_preview = is_linkedin_search(post["url"])
@@ -66,6 +68,13 @@ def capture(post, sample):
             if preview and is_linkedin_search(preview["url"]):
                 record_id = preview_id
                 previous = preview
+        scan = get("scans", scan_id) if scan_id else None
+
+        def save_membership():
+            if scan is not None and record_id not in scan["members"]:
+                scan["members"][record_id] = "seen" if previous else "new"
+                put("scans", scan_id, scan)
+
         recovered_link = previous and post_id and is_linkedin_search(previous["url"])
         if previous and not recovered_link and previous["status"] != "Outside target roles" and not (previous.get("route", previous["status"]) == "Unverified lead" and route and route != "Unverified lead"):
             if previous.get("route", previous["status"]) == "Unverified lead":
@@ -78,6 +87,7 @@ def capture(post, sample):
                     updated.update(published=post["published"], date_kind=post["date_kind"])
                 if updated != previous:
                     put("posts", record_id, updated)
+            save_membership()
             return 0
         status = "Needs draft"
         if route and route != "Needs draft":
@@ -89,10 +99,15 @@ def capture(post, sample):
         if post_id:
             put("linkedin_ids", post_id, {"post": record_id})
         record = dict(post, id=record_id, recipient=recipient, status=status, sample=sample, apply_link=apply_link, route=status)
+        first_scan = previous.get("scan_id") if previous else scan_id
+        if first_scan:
+            record["scan_id"] = first_scan
         if (previous and previous["status"] == "Unverified lead" and previous.get("fit_reason")
                 and " ".join(previous["text"].split()) == " ".join(post["text"].split())):
-            record.update(fit_reason=previous["fit_reason"], fit_resume=previous.get("fit_resume"))
+            record.update(fit_reason=previous["fit_reason"], fit_resume=previous.get("fit_resume"),
+                          fit_policy=previous.get("fit_policy"))
         put("posts", record_id, record)
+        save_membership()
         return int(previous is None)
     return transact(insert)
 
@@ -166,18 +181,27 @@ def generate(post, resume, instruction, schema, on_retry=None):
                     on_retry(0)
 
 
+_FIT_POLICY = "role-and-skills-v1"
+
+
+def fit_is_current(post, resume):
+    return post.get("fit_policy") == _FIT_POLICY and post.get("fit_resume") == resume["version"]
+
+
 def resume_fit(post, resume, on_retry=None):
     if cfg.MODEL:
         return generate(post, resume,
-                        "Compare the job's core responsibilities and requirements with demonstrated "
-                        "experience, skills and transferable qualifications in the résumé. Mark relevant "
-                        "only for a plausible supported fit. Explain the evidence or gap in one sentence. "
-                        "Use only job-related qualifications. Never infer personal characteristics.", ResumeFit, on_retry)
+                        "Decide whether the opening's role and core work align with the candidate's profile, "
+                        "skills, projects or transferable skills. Count a related role with supported overlap as relevant. "
+                        "Ignore years of experience, tenure, graduation dates, seniority and past title level completely "
+                        "in the decision and explanation. Do not require every listed tool. General commentary without "
+                        "a concrete opening is irrelevant. Explain the role or skill overlap or gap in one sentence. "
+                        "Never infer personal characteristics.", ResumeFit, on_retry)
     if not cfg.DRY:
         raise ValueError("Configure Vertex AI before enabling delivery")
     # Make the offline practice comparison inspectable. Ignore contact details and hiring boilerplate.
     ignored = set("and the for with are have from this that your our hiring looking experience skills "
-                  "work team role years apply resume email job jobs full time contract remote join".split())
+                  "work team role years year yrs months senior junior sr jr lead principal staff entry level seniority tenure apply resume email job jobs full time contract remote join".split())
     def keywords(text):
         return set(re.findall(r"[a-z][a-z0-9+#.-]{1,}", EMAIL.sub(" ", text).lower().replace(".", " "))) - ignored
     shared = sorted(keywords(post["title"] + " " + post["text"]) & keywords(resume["text"]))
@@ -196,7 +220,7 @@ def draft(post, resume, on_retry=None):
 
 def assess(post, resume, on_retry=None):
     route = post.get("route", post["status"])
-    if post["status"] == "Needs draft" and post.get("fit_resume") == resume["version"] and post.get("fit_reason"):
+    if post["status"] == "Needs draft" and fit_is_current(post, resume) and post.get("fit_reason"):
         fit = ResumeFit(relevant=True, reason=post["fit_reason"])
     else:
         fit = resume_fit(post, resume, on_retry)
@@ -219,7 +243,7 @@ def assess(post, resume, on_retry=None):
                 status = "Ready for review" if preference["required"] else "Queued"
                 current.update(subject=pitch.subject, message=pitch.body, resume=resume["version"],
                                filename=resume["name"], preview=cfg.DRY)
-        current.update(status=status, route=route, fit_reason=fit.reason, fit_resume=resume["version"])
+        current.update(status=status, route=route, fit_reason=fit.reason, fit_resume=resume["version"], fit_policy=_FIT_POLICY)
         put("posts", post["id"], current)
     transact(persist)
 
@@ -258,8 +282,16 @@ def collect():
     return collect_results(posts, search, not (cfg.FEED or cfg.LINKEDIN_COOKIE))
 
 
-def collect_results(posts, search, sample=False, on_match_progress=None):
-    count = sum(capture(post, sample) for post in posts if search.matches(post))
+def collect_results(posts, search, sample=False, on_match_progress=None, scan_id=None):
+    scan_id = str(scan_id or uuid4())
+    posts = list(posts)
+
+    def start(get, put):
+        if not get("scans", scan_id):
+            put("scans", scan_id, {"id": scan_id, "checked": len(posts), "members": {}})
+            put("settings", "latest_scan", {"id": scan_id})
+    transact(start)
+    count = sum(capture(post, sample, scan_id) for post in posts if search.matches(post))
     prepare(on_match_progress)
     return count
 
@@ -273,7 +305,7 @@ def prepare(on_match_progress=None):
                 "Check application instructions", "Unverified lead", "Low résumé match"}
     candidates = [
         post for post in iter_posts(eligible)
-        if (post.get("fit_resume") != resume["version"] or post["status"] == "Needs draft") and search.matches(post)
+        if (not fit_is_current(post, resume) or post["status"] == "Needs draft") and search.matches(post)
     ]
     if on_match_progress:
         # Interactive scans report each result and stop issuing requests on a quota error.

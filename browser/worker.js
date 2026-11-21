@@ -14,6 +14,19 @@ async function openLinkedInTab(options, signal) {
   return chrome.tabs.create(options);
 }
 
+// Closing a temporary tab also interrupts a page script that is waiting on its DOM.
+function temporaryTabCleanup(tabId, signal) {
+  let closing;
+  function close() {
+    signal.removeEventListener("abort", close);
+    closing ??= chrome.tabs.remove(tabId).catch(()=>{});
+    return closing;
+  }
+  if (signal.aborted) close();
+  else signal.addEventListener("abort", close, {once:true});
+  return close;
+}
+
 async function tabReady(tabId, signal) {
   signal.throwIfAborted();
   const tab = await chrome.tabs.get(tabId);
@@ -39,7 +52,10 @@ async function tabReady(tabId, signal) {
 chrome.runtime.onConnect.addListener(port => {
   if (port.name !== "hiremate-search") return;
   const controller = new AbortController();
-  port.onDisconnect.addListener(()=>controller.abort());
+  port.onDisconnect.addListener(()=>{
+    controller.abort();
+    activeJobs.delete(controller);
+  });
   async function start(message) {
     port.onMessage.removeListener(start);
     const report = status => {
@@ -122,7 +138,7 @@ async function recheck(saved, sender, report, signal) {
         "The saved preview could not be found in the current search results.";
       return [post];
     }
-    if (new URL(matches[0].url).pathname.startsWith("/search/")) {
+    if (!matches[0].short_post_link && new URL(matches[0].url).pathname.startsWith("/search/")) {
       if (hasPostDate(matches[0])) {
         post.published = matches[0].published;
         post.date_kind = matches[0].date_kind;
@@ -137,6 +153,9 @@ async function recheck(saved, sender, report, signal) {
   report("Checking the original LinkedIn post…");
   await checkOriginal(post, signal);
   signal.throwIfAborted();
+  if (new URL(post.url).pathname.startsWith("/search/")) {
+    return [{...saved, verification_note:post.verification_note}];
+  }
   return [post];
 }
 
@@ -148,10 +167,13 @@ function applyVisibleAge(post) {
   if (post.date_kind === "published" || !label) return;
   const match = label.trim().match(/^(\d+)\s*(m|h|d|w)(?:\s*(?:[·•]|$))/i);
   if (!match) return;
-  const days = Number(match[1]) * ({m:0,h:0,d:1,w:7})[match[2].toLowerCase()];
-  if (!Number.isSafeInteger(days) || days > 36500) return;
+  const amount = Number(match[1]);
+  const unit = match[2].toLowerCase();
+  const minutes = amount * ({m:1,h:60,d:1440,w:10080})[unit];
+  if (!Number.isSafeInteger(minutes) || minutes > 36500 * 1440) return;
   const date = new Date();
-  date.setDate(date.getDate() - days);
+  if (unit === "w" || unit === "d") date.setDate(date.getDate() - amount * (unit === "w" ? 7 : 1));
+  else date.setTime(date.getTime() - minutes * 60000);
   const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
   Object.assign(post,{published:localDate.toISOString().slice(0,10),date_kind:"relative"});
 }
@@ -166,6 +188,7 @@ async function search(message, sender, report, signal) {
       url.pathname !== "/search/results/content/") throw Error("Open your local HireMate dashboard first.");
   report("Opening LinkedIn. Return to HireMate to follow the search.");
   const tab = await openLinkedInTab({url: url.href, active:!message.targeted},signal);
+  const closeTab = message.targeted && temporaryTabCleanup(tab.id, signal);
   try {
     // Keep the results visible so the user can inspect them or complete sign-in.
     let diagnostic = 'The results page did not finish loading.';
@@ -181,7 +204,7 @@ async function search(message, sender, report, signal) {
         const posts = scan.result.posts;
         posts.forEach(applyVisibleAge);
         if (message.targeted) return posts;
-        const originals = posts.filter(post => !new URL(post.url).pathname.startsWith("/search/") &&
+        const originals = posts.filter(post => post.short_post_link || !new URL(post.url).pathname.startsWith("/search/") &&
           (!hasPostDate(post) || post.content_kind !== "full"));
         let next = 0, completed = 0;
         async function verify() {
@@ -200,7 +223,7 @@ async function search(message, sender, report, signal) {
     }
     throw Error("Could not import LinkedIn results. " + diagnostic);
   } finally {
-    if (message.targeted) await chrome.tabs.remove(tab.id).catch(()=>{});
+    if (closeTab) await closeTab();
   }
 }
 
@@ -237,23 +260,31 @@ async function readResults(tabId, allowExpansion, report, signal) {
 }
 
 async function checkOriginal(post, signal) {
-  const url = new URL(post.url);
-  if (url.origin !== "https://www.linkedin.com" || url.pathname.startsWith("/search/")) return;
-  let originalTab;
+  const short = post.short_post_link;
+  delete post.short_post_link;
+  const url = new URL(short || post.url);
+  if (short ? !/^https:\/\/lnkd\.in\/p\/[a-z0-9_-]+\/?$/i.test(short) : url.origin !== "https://www.linkedin.com" || url.pathname.startsWith("/search/")) return;
+  let closeTab;
   try {
-    originalTab = await openLinkedInTab({url:url.href, active:false},signal);
+    const originalTab = await openLinkedInTab({url:url.href, active:false},signal);
+    closeTab = temporaryTabCleanup(originalTab.id, signal);
     for (let attempt=0; attempt<20; attempt++) {
       await new Promise(resolve=>setTimeout(resolve,400));
       signal.throwIfAborted();
+      if (short && post.url.includes("/search/")) {
+        const tab = await chrome.tabs.get(originalTab.id);
+        if (!tab.url?.startsWith("https://www.linkedin.com/") || tab.status!=="complete") continue;
+      }
       if (!await tabReady(originalTab.id,signal)) continue;
       const [scan] = await chrome.scripting.executeScript({
-        target:{tabId:originalTab.id}, func:publicationRecord, args:[post.url,postAgeSelector]
+        target:{tabId:originalTab.id}, func:publicationRecord, args:[post.url,postAgeSelector,Boolean(short && post.url.includes("/search/"))]
       });
       const result = scan.result;
       if (result.stop) {
         post.verification_note = result.stop;
         return;
       }
+      if (result.permalink) post.url = result.permalink;
       Object.assign(post,result.evidence);
       applyVisibleAge(post);
       if (post.content_kind==="full" && hasPostDate(post)) {
@@ -262,17 +293,21 @@ async function checkOriginal(post, signal) {
         return;
       }
     }
+    if (short && post.url.includes("/search/")) {
+      post.verification_note = "The shared link did not open an identifiable LinkedIn post.";
+      return;
+    }
     post.verification_note = hasPostDate(post) ? "Opened the original; the complete text is still unconfirmed." :
       "Opened the original; the publication date is still unconfirmed.";
   } catch {
     signal.throwIfAborted();
     post.verification_note = "The original post could not be read in the signed-in browser.";
   } finally {
-    if (originalTab) await chrome.tabs.remove(originalTab.id).catch(()=>{});
+    if (closeTab) await closeTab();
   }
 }
 
-function publicationRecord(original, ageSelector="time") {
+function publicationRecord(original, ageSelector="time", resolvingShortLink=false) {
   function postId(value) {
     let url;
     try { url = new URL(value, "https://www.linkedin.com"); } catch { return ""; }
@@ -283,7 +318,7 @@ function publicationRecord(original, ageSelector="time") {
     return url.pathname.match(/^\/feed\/update\/urn:li:(?:activity|share|ugcPost):(\d{15,21})\/?$/)?.[1] ||
       url.pathname.match(/^\/posts\/[^/]*-(\d{15,21})(?:-[^/]*)?\/?$/)?.[1] || "";
   }
-  const id = postId(original);
+  const id = postId(resolvingShortLink ? location.href : original);
   if (/^\/(?:signup|authwall|checkpoint|login|uas)(?:\/|$)/.test(location.pathname)) {
     return {stop:"LinkedIn requested sign-in when opening the original post."};
   }
@@ -332,7 +367,7 @@ function publicationRecord(original, ageSelector="time") {
     const text = body.innerText.trim();
     if (!more && text && text.length<=30000 && !evidence.text) Object.assign(evidence,{text,content_kind:"full"});
   }
-  return {evidence};
+  return {evidence, permalink:resolvingShortLink ? location.href : undefined};
 }
 
 async function readPosts(allowExpansion=true, ageSelector="time") {
@@ -344,32 +379,39 @@ async function readPosts(allowExpansion=true, ageSelector="time") {
   const bodySelector = ".update-components-text,.feed-shared-update-v2__description,[data-testid='expandable-text-box'],[data-testid='expandable-text'],[data-view-name='feed-commentary']";
   const markerSelector = "a[href*='highlightedUpdateUrn='],a[href*='/feed/update/'],a[href*='/posts/'],[data-urn],[data-activity-urn],[data-id],[componentkey*='urn:li:']";
   const headingSelector = "h1,h2,h3,h4,[role=heading]";
-  function idOf(node) {
-    const attr = ["data-urn","data-activity-urn","data-id","componentkey"].map(k=>node.getAttribute(k)||"").join(" ");
-    const urn = attr.match(/urn:li:(activity|share|ugcPost):(\d{15,21})(?!\d)/);
-    if (urn) return urn[2];
-    if (!node.href) return "";
-    const url = new URL(node.href);
-    if (url.origin !== "https://www.linkedin.com") return "";
+  function directPostLink(value) {
+    if (!value) return null;
+    let url;
+    try { url = new URL(value, location.origin); } catch { return null; }
+    if (!["https://www.linkedin.com", "https://linkedin.com"].includes(url.origin) || url.username || url.password) return null;
+    url.hostname = "www.linkedin.com";
+    if (url.pathname.startsWith("/feed/update/")) url.pathname = url.pathname.replace(/%3a/gi,":");
     const group = /^\/groups\/\d+\/?$/.test(url.pathname) && url.searchParams.get("highlightedUpdateUrn");
-    return (group && group.match(/^urn:li:activity:(\d{15,21})$/)?.[1]) ||
+    const id = (group && group.match(/^urn:li:activity:(\d{15,21})$/)?.[1]) ||
       url.pathname.match(/^\/feed\/update\/urn:li:(?:activity|share|ugcPost):(\d{15,21})\/?$/)?.[1] ||
-      url.pathname.match(/^\/posts\/[^/]*-(\d{15,21})(?:-[^/]*)?\/?$/)?.[1] || "";
+      url.pathname.match(/^\/posts\/[^/]*-(\d{15,21})(?:-[^/]*)?\/?$/)?.[1];
+    return id ? {id, url:url.href} : null;
   }
-  const markers = Array.from(root.querySelectorAll(markerSelector)).map(node=>({node,id:idOf(node)})).filter(m=>m.id);
+  const excluded = bodySelector + ",[data-view-name*='comment-thread'],.comments-comment-item,blockquote";
+  function marker(node) {
+    if (node.closest(excluded)) return null;
+    const link = directPostLink(node.href);
+    if (link) return {node,...link};
+    const attr = ["data-urn","data-activity-urn","data-id","componentkey"].map(k=>node.getAttribute(k)||"").join(" ");
+    const urn = attr.match(/urn:li:(?:activity|share|ugcPost):(\d{15,21})(?!\d)/);
+    return urn ? {node,id:urn[1],url:location.origin+"/feed/update/"+urn[0]+"/"} : null;
+  }
+  const markers = Array.from(root.querySelectorAll(markerSelector), marker).filter(Boolean);
   const headings = Array.from(root.querySelectorAll(headingSelector)).filter(h=>/^feed post$/i.test(h.textContent.trim()));
   const menus = Array.from(root.querySelectorAll("button[aria-label]")).filter(b=>/control menu for post|more options for post/i.test(b.getAttribute("aria-label")));
   const posts = new Map();
   function actionPermalink(value) {
-    if (typeof value !== "string" || value.length > 2048) return "";
+    if (typeof value !== "string" || !value.trim() || value.length > 2048) return "";
     let url;
     try { url = new URL(value, location.origin); } catch { return ""; }
-    if (url.protocol !== "https:" || !["linkedin.com","www.linkedin.com"].includes(url.hostname) ||
-        url.port || url.username || url.password) return "";
-    url.hostname = "www.linkedin.com";
-    // Some share controls percent-encode the URN separators in feed links.
-    if (url.pathname.startsWith("/feed/update/")) url.pathname = url.pathname.replace(/%3a/gi,":");
-    return idOf({href:url.href,getAttribute:()=>""}) ? url.href : "";
+    if (url.origin==="https://lnkd.in" && !url.username && !url.password && /^\/p\/[a-z0-9_-]+\/?$/i.test(url.pathname))
+      return url.origin + url.pathname;
+    return directPostLink(url.href)?.url || "";
   }
   // LinkedIn can generate the URL inside its copy handler. Capture just that
   // command's outgoing permalink; never read the user's clipboard.
@@ -377,7 +419,9 @@ async function readPosts(allowExpansion=true, ageSelector="time") {
     let finish;
     const captured = new Promise(resolve=>{finish=resolve});
     const restore = [];
+    let sawText = false;
     function accept(text) {
+      if (typeof text === "string" && text.trim()) sawText = true;
       const href = actionPermalink(text);
       if (!href) return false;
       finish(href);
@@ -402,6 +446,14 @@ async function readPosts(allowExpansion=true, ageSelector="time") {
       wrap(navigator.clipboard,"writeText",function(original,args) {
         return accept(args[0]) ? Promise.resolve() : original.apply(this,args);
       });
+      wrap(navigator.clipboard,"write",async function(original,args) {
+        for (const item of args[0] || []) {
+          if (!item.types?.includes("text/plain")) continue;
+          const blob = await item.getType("text/plain");
+          if (blob.size<=2048 && accept(await blob.text())) return;
+        }
+        return original.apply(this,args);
+      });
       wrap(document,"execCommand",function(original,args) {
         if (String(args[0]).toLowerCase()==="copy") {
           const field = document.activeElement;
@@ -411,7 +463,12 @@ async function readPosts(allowExpansion=true, ageSelector="time") {
         }
         return original.apply(this,args);
       });
-      const timeout = new Promise(resolve=>{timer=setTimeout(()=>resolve(""),800)});
+      const onCopy = event => {
+        if (event.defaultPrevented) accept(event.clipboardData?.getData("text/plain"));
+      };
+      window.addEventListener("copy",onCopy);
+      restore.push(()=>window.removeEventListener("copy",onCopy));
+      const timeout = new Promise(resolve=>{timer=setTimeout(()=>resolve(""),1500)});
       button.click();
       return await Promise.race([captured,timeout]);
     } catch {
@@ -419,6 +476,7 @@ async function readPosts(allowExpansion=true, ageSelector="time") {
     } finally {
       clearTimeout(timer);
       for (const reset of restore.reverse()) reset();
+      button.dataset.hiremateCopyResult = sawText ? "unrecognized" : "empty";
     }
   }
   async function menuPermalink(card) {
@@ -450,10 +508,10 @@ async function readPosts(allowExpansion=true, ageSelector="time") {
           }
         }
         for (const link of panels[0].querySelectorAll("a[href]")) {
-          if (/^(?:view|open|go to|link to|copy link to)(?: this)? post$/i.test(link.innerText.trim()) &&
-              idOf(link) && new URL(link.href).origin===location.origin) {
-            menu.dataset.hiremateLink = link.href;
-            return link.href;
+          const postLink = directPostLink(link.href);
+          if (postLink && /^(?:view|open|go to|link to|copy link to)(?: this)? post$/i.test(link.innerText.trim())) {
+            menu.dataset.hiremateLink = postLink.url;
+            return postLink.url;
           }
         }
         const actions = Array.from(panels[0].querySelectorAll('button,[role=button],[role=menuitem],a'));
@@ -468,7 +526,9 @@ async function readPosts(allowExpansion=true, ageSelector="time") {
             menu.dataset.hiremateLink = href;
             return href;
           }
-          menu.dataset.hiremateCheck = "LinkedIn’s copy action did not provide a direct post link.";
+          menu.dataset.hiremateCheck = copy.dataset.hiremateCopyResult==="unrecognized" ?
+            "LinkedIn returned text, but it did not identify an individual post." :
+            "LinkedIn opened the copy action without exposing a post URL.";
           if (!embed) break;
           // Copy may dismiss or replace the menu. Look up Embed again in this post’s panel.
           if (!panels[0].isConnected || !panels[0].getClientRects().length) menu.click();
@@ -511,10 +571,38 @@ async function readPosts(allowExpansion=true, ageSelector="time") {
     }
   }
   function dateEvidence(card) {
-    const stamp = card.querySelector("time[datetime]")?.getAttribute("datetime") || "";
-    if (/^\d{4}-\d{2}-\d{2}/.test(stamp)) return {published:stamp.slice(0,10),date_kind:"published"};
-    const age = card.querySelector(ageSelector);
-    return {published:"",date_kind:"unknown",age_label:age?.getClientRects().length ? age.innerText : ""};
+    const body = card.querySelector(bodySelector);
+    const menu = menus.find(button=>card.contains(button));
+    const before = (node, anchor) => anchor && Boolean(node.compareDocumentPosition(anchor) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const headerNodes = card.querySelectorAll(ageSelector+",a[href],span,[aria-label],[title]");
+    const labels = new Set();
+    const dates = new Set();
+    for (const node of headerNodes) {
+      if (node.closest(excluded) || (body && !before(node,body))) continue;
+      const trusted = node.matches(ageSelector) || directPostLink(node.closest("a[href]")?.href);
+      if (!trusted && !before(node,body || menu) && !node.closest("header")) continue;
+      const stamp = node.getAttribute("datetime") || "";
+      if (node.matches("time") && /^\d{4}-\d{2}-\d{2}(?:T|$)/.test(stamp) && Number.isFinite(Date.parse(stamp)))
+        dates.add(stamp.slice(0,10));
+      if (!node.getClientRects().length || (body && node.contains(body))) continue;
+      for (const text of [node.getAttribute("aria-label"),node.title,node.innerText]) {
+        const age = text?.trim().match(/^(?:posted\s+)?(\d+)\s*(minutes?|mins?|m|hours?|hrs?|h|days?|d|weeks?|w)(?:\s+ago)?(?:\s*(?:[·•]|$))/i);
+        if (age) labels.add(age[1]+age[2][0].toLowerCase());
+      }
+    }
+    if (dates.size===1) return {published:[...dates][0],date_kind:"published"};
+    // Some author lines have a bare text node beside the menu, with no wrapping span.
+    if (!labels.size && menu) {
+      const walker = document.createTreeWalker(card, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if (!before(node, menu)) break;
+        if ((body && !before(node,body)) || node.parentElement.closest(excluded)) continue;
+        const match = node.textContent.trim().match(/^(\d+)\s*([mhdw])\s*[·•](?:\s*Edited\s*[·•])?$/i);
+        if (match && node.parentElement.getClientRects().length) labels.add(match[1]+match[2].toLowerCase());
+      }
+    }
+    return {published:"",date_kind:"unknown",age_label:labels.size===1 ? [...labels][0] : ""};
   }
   function expandControl(card) {
     return Array.from(card.querySelectorAll("button,[role=button]")).find(button => {
@@ -528,7 +616,7 @@ async function readPosts(allowExpansion=true, ageSelector="time") {
     control.click();
     return true;
   }
-  for (const {node,id} of markers) {
+  for (const {node,id,url} of markers) {
     if (posts.has(id)) continue;
     // Follow the permalink up to its own post, stopping before any neighbouring card.
     for (let card=node; card && card!==root; card=card.parentElement) {
@@ -544,10 +632,10 @@ async function readPosts(allowExpansion=true, ageSelector="time") {
         return {posts:[], diagnostic:"Waiting for LinkedIn to expand a post."};
       }
       const directLink = markers.find(m=>m.id===id && m.node.href && card.contains(m.node));
-      const record = {url:directLink?.node.href || "https://www.linkedin.com/feed/update/urn:li:activity:"+id+"/",
+      const record = {url:directLink?.url || url,
         title:text.split("\n").find(line=>/hiring|vacancy|opening/i.test(line))?.slice(0,300) || text.split("\n")[0].slice(0,300),
         text:text.slice(0,30000),...dateEvidence(card),
-        content_kind:!body || expand || text.length>30000?"snippet":"full"};
+        content_kind:!body || expand || text.length>30000 || /…$|\.{3}$/.test(text)?"snippet":"full"};
       posts.set(id,record);
       if (body || singleCard) break;
     }
@@ -581,12 +669,15 @@ async function readPosts(allowExpansion=true, ageSelector="time") {
         }
         const original = await menuPermalink(controls);
         const menu = menus.find(button=>controls.contains(button));
+        const short = original.startsWith("https://lnkd.in/");
         posts.set(original || "preview:" + title + "\n" + text, {
           ...(original ? {preview_text:text.slice(0,30000)} : {}),
           verification_note:original ? "Found the original link in the post menu." :
             menu?.dataset.hiremateCheck || (menu ? "The post menu could not be read." : "No post menu or original link was found on this search card."),
-          url: original || searchUrl.href, title: title.slice(0,300), text: text.slice(0,30000),
-          ...dateEvidence(controls), content_kind:"snippet"
+          ...(short ? {short_post_link:original} : {}),
+          url: original && !short ? original : searchUrl.href, title: title.slice(0,300), text: text.slice(0,30000),
+          ...dateEvidence(controls), content_kind:original && !short && body && !expandControl(controls) &&
+            text.length<=30000 && !/[.…]{3}$|…$/.test(text) ? "full" : "snippet"
         });
         break;
       }

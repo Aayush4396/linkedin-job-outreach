@@ -76,7 +76,7 @@ with sync_playwright() as pw:
       const realFetch=window.fetch.bind(window);
       window.imports=[];
       window.fetch=(url,opts)=>url==='/api/browser-results' ? new Promise(resolve=>{
-        imports.push({id:opts.headers['X-HireMate-Recheck'],done:code=>resolve(new Response(
+        imports.push({id:opts.headers['X-HireMate-Recheck'],posts:JSON.parse(opts.body),done:code=>resolve(new Response(
           JSON.stringify({checked:1,new:0,status:'Unverified lead'}),{status:code}))});
       }) : realFetch(url,opts);
     }""")
@@ -93,5 +93,28 @@ with sync_playwright() as pw:
     assert page.evaluate("ports.length") == 3
     assert "1 of 5 retry results saved" in page.locator("#notice").inner_text()
     assert "retry limit" in page.locator("#notice").inner_text()
+    assert "2 checks never started" in page.locator("#notice").inner_text()
+
+    # One idle lookup should save its own diagnostic while the other worker continues.
+    page.clock.install()
+    page.evaluate("ports.length=0; imports.length=0")
+    page.locator("#recheck").click()
+    page.clock.fast_forward(60000)
+    page.evaluate("ports[1].onMessage.send({status:'Reading LinkedIn result 2 of 3…'})")
+    page.clock.fast_forward(31000)
+    page.wait_for_function("imports.length===1")
+    stalled = page.evaluate("imports[0].posts[0]")
+    assert stalled["id"] == "0" and "90 seconds" in stalled["verification_note"]
+    assert stalled["url"] == leads[0]["url"]
+    page.evaluate("imports[0].done(200)")
+    page.wait_for_function("ports.length===3")
+    for i in range(1, 5):
+        page.evaluate("i=>ports[i].onMessage.send({posts:[{}]})", i)
+        page.wait_for_function("i=>imports.length>i", arg=i)
+        page.evaluate("i=>imports[i].done(200)", i)
+        page.wait_for_function("i=>ports.length>=Math.min(i+3,5)", arg=i)
+    page.wait_for_function("!document.querySelector('#recheck').disabled")
+    summary = page.locator("#notice").inner_text()
+    assert "5 of 5 retry results saved" in summary and "1 browser lookup timed out" in summary
 
 print("Progress, delayed update, timeout, disconnection, retry and server error checks passed.")

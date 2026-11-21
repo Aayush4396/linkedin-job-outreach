@@ -25,7 +25,7 @@ from .search import Search, saved_search
 from .sources import validate
 from .post_discovery import application_link, is_linkedin_search, linkedin_id
 from .store import EMAIL, import_preview
-from .workflow import assess, capture, claim_manual_scan, collect, collect_results, dispatch, prepare, review
+from .workflow import assess, capture, claim_manual_scan, collect, collect_results, dispatch, fit_is_current, prepare, review
 
 __all__ = [
     "app",
@@ -136,7 +136,9 @@ def posts():
     today = datetime.now(ZoneInfo(cfg.ZONE)).date().isoformat()
     sent_today = sum(p.get("sent_day") == today for p in rows)
     health = read("settings", "linkedin") or {}
-    return {"search": saved_search().model_dump(), "sent_today": sent_today, "rotate": bool(cfg.BUCKET and cfg.LINKEDIN_COOKIE and not cfg.FEED),
+    latest = read("settings", "latest_scan")
+    return {"latest_scan": read("scans", latest["id"]) if latest else None,
+            "search": saved_search().model_dump(), "sent_today": sent_today, "rotate": bool(cfg.BUCKET and cfg.LINKEDIN_COOKIE and not cfg.FEED),
             "connection": "Reconnect your account" if health.get("expired") else ("Connected" if health.get("connected") else "Awaiting scan"),
             "source": "Connected feed" if cfg.FEED else ("LinkedIn search" if cfg.LINKEDIN_COOKIE else "Sample posts"), "posts": rows,
             "resume": read("settings","resume"), "dry": cfg.DRY, "approval": (read("settings","approval") or {"required":cfg.APPROVAL})["required"]}
@@ -319,11 +321,11 @@ def browser_results(request: Request, posts: list[BrowserPost]):
             resume = read("settings", "resume")
             if (resume and current["status"] in {"Needs draft", "Unverified lead", "Apply via link",
                                                  "Check application instructions", "No email listed", "Check recipients"}
-                    and (current["status"] == "Needs draft" or current.get("fit_resume") != resume["version"])):
+                    and (current["status"] == "Needs draft" or not fit_is_current(current, resume))):
                 progress(0, 1)
                 assess(current, resume, lambda delay: progress(0, 1, delay))
             return {"checked": 1, "new": 0, "status": read("posts", target)["status"]}
-        return {"new": collect_results(rows, saved_search(), on_match_progress=progress), "checked": len(rows)}
+        return {"new": collect_results(rows, saved_search(), on_match_progress=progress, scan_id=scan_id), "checked": len(rows)}
     except HTTPException:
         raise
     except Exception as exc:

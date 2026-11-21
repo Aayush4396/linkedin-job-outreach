@@ -198,6 +198,33 @@ class OutreachTests(unittest.TestCase):
             self.assertEqual(all_posts()[0]["fit_reason"], saved["fit_reason"])
             self.assertEqual(len(all_posts()), 1)
 
+    def test_scan_history_survives_repeat_and_old_fit_is_refreshed(self):
+        from uuid import uuid4
+        first, second = str(uuid4()), str(uuid4())
+        post = dict(url="https://www.linkedin.com/search/results/content/?keywords=payroll",
+                    title="Senior payroll accountant", text="Hiring for payroll. Requires 9 years.",
+                    published="", date_kind="unknown", content_kind="snippet")
+        save("cv.txt", b"Junior accountant, payroll, 1 year")
+        with TestClient(app) as client:
+            headers = {"x-hiremate": "1", "x-hiremate-scan": first}
+            client.post("/api/browser-results", headers=headers, json=[post, post]).raise_for_status()
+            row, = all_posts()
+            self.assertEqual(row["scan_id"], first)
+            self.assertEqual(read("scans", first)["members"], {row["id"]: "new"})
+            self.assertEqual(row["status"], "Unverified lead")
+            row.pop("fit_policy")
+            row.update(status="Low résumé match", fit_reason="Previously penalized for tenure")
+            transact(lambda get, put: put("posts", row["id"], row))
+            headers["x-hiremate-scan"] = second
+            client.post("/api/browser-results", headers=headers, json=[post]).raise_for_status()
+            data = client.get("/api/posts").json()
+            self.assertEqual(data["latest_scan"]["members"], {row["id"]: "seen"})
+            self.assertEqual(data["latest_scan"]["id"], second)
+            saved, = data["posts"]
+            self.assertEqual(saved["scan_id"], first)
+            self.assertEqual(saved["status"], "Unverified lead")
+            self.assertNotEqual(saved["fit_reason"], row["fit_reason"])
+
     def test_saved_search_browser_to_draft(self):
         from datetime import date
         prefs = dict(roles="GenAI", locations="India", workplace="Remote", employment="Contract")

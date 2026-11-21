@@ -1,18 +1,17 @@
 if (location.pathname === "/" && document.title.startsWith("HireMate")) {
   document.documentElement.dataset.hiremateBrowser = "ready";
   document.documentElement.dataset.hiremateProgress = "1";
-  document.documentElement.dataset.hiremateRecheck = "4";
+  document.documentElement.dataset.hiremateRecheck = "5";
   const active = new Map();
+  class BatchPause extends Error {}
   let scanning = false;
 
   document.addEventListener("hiremate-search", async event => {
     const target = event.detail?.target;
     if (scanning || active.size >= 2 || (!target && active.size)) return;
     scanning = !target;
-    let pause;
     function stopBatch(reason) {
-      pause = reason;
-      for (const other of active.keys()) other.abort(new Error(reason));
+      for (const other of active.keys()) other.abort(new BatchPause(reason));
     }
     const prefix = target ? event.detail.position+" · " : "";
     let success = false;
@@ -26,6 +25,8 @@ if (location.pathname === "/" && document.title.startsWith("HireMate")) {
     let stage = "Connecting to the browser…";
     let port;
     let pollTimer;
+    let finishStalledLookup;
+    let timedOut = false;
     const controller = new AbortController();
 
     active.set(controller, prefix + stage);
@@ -41,10 +42,16 @@ if (location.pathname === "/" && document.title.startsWith("HireMate")) {
       const idle = Math.floor((Date.now() - lastUpdate) / 1000);
       if (clock) clock.textContent = elapsed + "s elapsed" +
         (idle >= 20 ? " · No new update for " + idle + "s" : "");
-      if (idle >= (importing ? 180 : 90)) {
-        const help = importing ? "HireMate is still waiting for the server. Refresh to check for saved posts before retrying." :
-          "Check the open LinkedIn tab for a sign-in prompt, then select Find posts in my browser to retry.";
-        controller.abort(new Error("No update while " + stage.replace(/[… .]+$/, "").toLowerCase() + ". " + help));
+      if (importing && idle >= 180) {
+        stopBatch("The server stopped reporting progress. Refresh HireMate to see which results were saved before retrying.");
+      } else if (!importing && idle >= 90 && !controller.signal.aborted) {
+        const reason = "No progress for 90 seconds while " + stage.replace(/[… .]+$/, "").toLowerCase() + ".";
+        if (target && finishStalledLookup) {
+          timedOut = true;
+          finishStalledLookup([{...target, verification_note:reason}]);
+        } else {
+          controller.abort(new Error(reason + " Select Find posts in my browser to retry."));
+        }
       }
     }
     const timer = setInterval(tick,1000);
@@ -53,11 +60,14 @@ if (location.pathname === "/" && document.title.startsWith("HireMate")) {
       tick();
       port = chrome.runtime.connect({name:"hiremate-search"});
       const posts = await new Promise((resolve,reject) => {
+        finishStalledLookup = resolve;
         controller.signal.addEventListener("abort",()=>reject(controller.signal.reason),{once:true});
         port.onDisconnect.addListener(()=>{
           const error = chrome.runtime.lastError;
-          reject(Error(error ? "Lost the connection to the extension. Refresh HireMate and retry." :
-            "The browser stopped checking posts. Select Find posts in my browser to retry."));
+          if (port && active.has(controller) && !importing && !controller.signal.aborted) {
+            stopBatch(error ? "Lost the connection to the extension. Refresh HireMate and retry." :
+              "The browser connection closed. Refresh HireMate and retry.");
+          }
         });
         port.onMessage.addListener(message=>{
           if (message.status) update(message.status);
@@ -120,7 +130,9 @@ if (location.pathname === "/" && document.title.startsWith("HireMate")) {
       port?.disconnect();
       active.delete(controller);
       if (!target) scanning = false;
-      document.dispatchEvent(new CustomEvent("hiremate-finished",{detail:{id:target?.id,success,status:resultStatus,pause:pause || (controller.signal.aborted && controller.signal.reason?.message)}}));
+      const reason = controller.signal.reason;
+      document.dispatchEvent(new CustomEvent("hiremate-finished",{detail:{id:target?.id,success,status:resultStatus,timedOut,
+        pause:reason instanceof BatchPause ? reason.message : undefined}}));
     }
   });
 }
