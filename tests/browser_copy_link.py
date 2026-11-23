@@ -6,6 +6,8 @@ from playwright.sync_api import sync_playwright
 
 def main():
     worker = (Path(__file__).resolve().parents[1] / "browser/worker.js").read_text(encoding="utf8")
+    selectors = worker[worker.index("const postAgeSelector"):worker.index("async function search(")]
+    readers = selectors + worker[worker.index("function publicationRecord"):]
     original = "https://www.linkedin.com/feed/update/urn:li:activity:7527956605288652801/"
     search = "https://www.linkedin.com/search/results/content/?keywords=payroll"
     html = """<main><article><h2>Feed post</h2>
@@ -18,7 +20,7 @@ def main():
         page = pw.chromium.launch(channel="chrome").new_page()
         page.route("**/*", lambda route: route.fulfill(body=html, content_type="text/html"))
         page.goto(search)
-        page.add_script_tag(content=worker[worker.index("function publicationRecord"):])
+        page.add_script_tag(content=readers)
         page.evaluate("""url => {
             window.priorWrite = navigator.clipboard.writeText;
             document.querySelector('#copy').onclick = () => Promise.resolve().then(() => navigator.clipboard.writeText(url));
@@ -70,7 +72,6 @@ def main():
         assert shared["age_label"] == "23m", shared
 
         # The first scan can use a timestamp link and age without opening the menu or original.
-        page.add_script_tag(content=worker[worker.index("const postAgeSelector"):worker.index("async function search(")])
         body = '<div class="update-components-text">Hiring an accountant for the finance team to support month-end reporting.</div>'
         encoded = original.replace("www.", "").replace("urn:li:activity:", "urn%3Ali%3Aactivity%3A")
         page.set_content(f"""<main><article><h2>Feed post</h2><a href="{encoded}">
@@ -108,7 +109,7 @@ def main():
           <time datetime="2026-11-18"></time>
           <div class="update-components-text">Hiring an accountant. Send your CV to payroll@example.org</div>
           </article></main>""")
-        page.add_script_tag(content=worker[worker.index("function publicationRecord"):])
+        page.add_script_tag(content=readers)
         checked = page.evaluate("url => publicationRecord(url)", original)
         resolved = page.evaluate("url=>publicationRecord(url,'time',true)", search)
         assert resolved["permalink"] == original
@@ -116,8 +117,63 @@ def main():
         assert checked["evidence"]["published"] == "2026-11-18"
         assert "payroll@example.org" in checked["evidence"]["text"]
         assert "stop" in page.evaluate("url => publicationRecord(url)", original.replace("801/", "802/"))
+        preview = "Hiring a payroll accountant to review reconciliations and lead the monthly close."
+        role_body = f'<div data-testid="expandable-text">{preview} Apply via the careers page.</div>'
+        preview_read = "(args) => publicationRecord(args[0], 'time', false, postBodySelector, args[1])"
+        # No post ID in the card. Match its text on the correct permalink, ignoring other content.
+        page.set_content(f"""<main><article>{role_body}<blockquote>{role_body}</blockquote>
+          <section data-view-name="comment-thread">{role_body}</section></article>
+          <article data-urn="urn:li:activity:7527956605288652802">{role_body}</article></main>""")
+        assert page.evaluate(preview_read, [original, preview])["evidence"]["text"] == preview + " Apply via the careers page."
+        page.evaluate("body=>document.querySelector('main').insertAdjacentHTML('beforeend','<article>'+body+'</article>')", role_body)
+        ambiguous = page.evaluate(preview_read, [original, preview])
+        assert "text" not in ambiguous["evidence"] and "Several" in ambiguous["diagnostic"]
+        page.set_content(f'<main><article><blockquote>{role_body}</blockquote></article></main>')
+        assert "text" not in page.evaluate(preview_read, [original, preview])["evidence"]
+        page.set_content(f'<div data-urn="urn:li:activity:7527956605288652801"><article>{role_body}</article></div>')
+        assert page.evaluate("url=>publicationRecord(url)", original)["evidence"]["content_kind"] == "full"
+        # A real public /posts/ page uses a different activity ID from its attributed share.
+        share_url = "https://www.linkedin.com/posts/example-hiring-share-7527956605288652801-test/"
+        page.goto(share_url)
+        page.add_script_tag(content=readers)
+        page.set_content(f'''<article data-activity-urn="urn:li:activity:7527956605288652802"
+          data-attributed-urn="urn:li:share:7527956605288652801">
+          <p data-test-id="main-feed-activity-card__commentary">{preview}</p></article>''')
+        assert page.evaluate("url=>publicationRecord(url)", share_url)["evidence"]["text"] == preview
+        page.goto(original)
+        page.add_script_tag(content=readers)
+        page.set_content(f'<main><article><header><a href="{original}">2d</a></header><div data-testid="expandable-text">{preview}…</div></article></main>')
+        clipped = page.evaluate("url=>publicationRecord(url)", original)
+        assert "text" not in clipped["evidence"] and "shortened" in clipped["diagnostic"]
+
+        # Run the first-scan verification loop, opening one original and waiting for expansion.
+        page.evaluate("""() => {
+          const button=document.createElement('button'); button.innerText='See more';
+          button.onclick=()=>setTimeout(()=>{
+            document.querySelector('[data-testid=expandable-text]').innerText='Hiring a payroll accountant. Apply via the careers page.';
+            button.remove();
+          }, 30);
+          document.querySelector('article').append(button);
+        }""")
+        page.add_script_tag(content=worker[worker.index("async function search("):worker.index("async function readResults(")] +
+                            worker[worker.index("async function checkOriginal("):worker.index("function publicationRecord")])
+        result = page.evaluate("""async ([url,preview])=>{
+          let opened=0, closed=0;
+          window.openLinkedInTab=async({active})=>({id:active?1:++opened+1});
+          window.temporaryTabCleanup=()=>()=>{closed++};
+          window.tabReady=async()=>true;
+          window.readResults=async()=>({result:{posts:[{url,text:preview,content_kind:'snippet',
+            published:'2026-11-20',date_kind:'relative'}]}});
+          window.chrome={scripting:{executeScript:async({func,args})=>[{result:func(...args)}]}};
+          const [post]=await search({url:'https://www.linkedin.com/search/results/content/'},
+            {url:'http://localhost/'},()=>{},new AbortController().signal);
+          return {opened,closed,post};
+        }""", [original, preview])
+        assert result["opened"] == result["closed"] == 1, result
+        assert result["post"]["content_kind"] == "full" and result["post"]["text"].endswith("careers page."), result
+        assert result["post"]["published"] == "2026-11-20"
         page.goto("https://www.linkedin.com/login")
-        page.add_script_tag(content=worker[worker.index("function publicationRecord"):])
+        page.add_script_tag(content=readers)
         assert "sign-in" in page.evaluate("url => publicationRecord(url)", original)["stop"]
     print("Copy command, cleanup, rendered post, wrong ID and sign-in checks passed.")
 

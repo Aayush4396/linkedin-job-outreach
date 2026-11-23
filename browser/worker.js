@@ -160,6 +160,7 @@ async function recheck(saved, sender, report, signal) {
 }
 
 const postAgeSelector = "time,.update-components-actor__sub-description,.feed-shared-actor__sub-description,[data-view-name='feed-actor-sub-description']";
+const postBodySelector = ".update-components-text,.feed-shared-update-v2__description,[data-testid='expandable-text-box'],[data-testid='expandable-text'],[data-view-name='feed-commentary'],[data-test-id='main-feed-activity-card__commentary']";
 
 function applyVisibleAge(post) {
   const label = post.age_label;
@@ -250,7 +251,7 @@ async function readResults(tabId, allowExpansion, report, signal) {
   },1500);
   try {
     const [scan] = await chrome.scripting.executeScript({
-      target:{tabId},world:"MAIN",func:readPosts,args:[allowExpansion,postAgeSelector]
+      target:{tabId},world:"MAIN",func:readPosts,args:[allowExpansion,postAgeSelector,postBodySelector]
     });
     return scan;
   } finally {
@@ -265,6 +266,7 @@ async function checkOriginal(post, signal) {
   const url = new URL(short || post.url);
   if (short ? !/^https:\/\/lnkd\.in\/p\/[a-z0-9_-]+\/?$/i.test(short) : url.origin !== "https://www.linkedin.com" || url.pathname.startsWith("/search/")) return;
   let closeTab;
+  let diagnostic = "The original page did not finish loading.";
   try {
     const originalTab = await openLinkedInTab({url:url.href, active:false},signal);
     closeTab = temporaryTabCleanup(originalTab.id, signal);
@@ -277,7 +279,8 @@ async function checkOriginal(post, signal) {
       }
       if (!await tabReady(originalTab.id,signal)) continue;
       const [scan] = await chrome.scripting.executeScript({
-        target:{tabId:originalTab.id}, func:publicationRecord, args:[post.url,postAgeSelector,Boolean(short && post.url.includes("/search/"))]
+        target:{tabId:originalTab.id}, func:publicationRecord,
+        args:[post.url,postAgeSelector,Boolean(short && post.url.includes("/search/")),postBodySelector,post.text]
       });
       const result = scan.result;
       if (result.stop) {
@@ -285,6 +288,7 @@ async function checkOriginal(post, signal) {
         return;
       }
       if (result.permalink) post.url = result.permalink;
+      diagnostic = result.diagnostic;
       Object.assign(post,result.evidence);
       applyVisibleAge(post);
       if (post.content_kind==="full" && hasPostDate(post)) {
@@ -297,8 +301,8 @@ async function checkOriginal(post, signal) {
       post.verification_note = "The shared link did not open an identifiable LinkedIn post.";
       return;
     }
-    post.verification_note = hasPostDate(post) ? "Opened the original; the complete text is still unconfirmed." :
-      "Opened the original; the publication date is still unconfirmed.";
+    post.verification_note = post.content_kind==="full" ? "Opened the original; the publication date is still unconfirmed." :
+      diagnostic || "The complete text of the original post is still unconfirmed.";
   } catch {
     signal.throwIfAborted();
     post.verification_note = "The original post could not be read in the signed-in browser.";
@@ -307,7 +311,7 @@ async function checkOriginal(post, signal) {
   }
 }
 
-function publicationRecord(original, ageSelector="time", resolvingShortLink=false) {
+function publicationRecord(original, ageSelector="time", resolvingShortLink=false, bodySelector=postBodySelector, preview="") {
   function postId(value) {
     let url;
     try { url = new URL(value, "https://www.linkedin.com"); } catch { return ""; }
@@ -315,7 +319,7 @@ function publicationRecord(original, ageSelector="time", resolvingShortLink=fals
     if (/^\/groups\/\d+\/?$/.test(url.pathname)) {
       return url.searchParams.get("highlightedUpdateUrn")?.match(/^urn:li:activity:(\d{15,21})$/)?.[1] || "";
     }
-    return url.pathname.match(/^\/feed\/update\/urn:li:(?:activity|share|ugcPost):(\d{15,21})\/?$/)?.[1] ||
+    return url.pathname.replace(/%3a/gi,":").match(/^\/feed\/update\/urn:li:(?:activity|share|ugcPost):(\d{15,21})\/?$/)?.[1] ||
       url.pathname.match(/^\/posts\/[^/]*-(\d{15,21})(?:-[^/]*)?\/?$/)?.[1] || "";
   }
   const id = postId(resolvingShortLink ? location.href : original);
@@ -347,36 +351,81 @@ function publicationRecord(original, ageSelector="time", resolvingShortLink=fals
       }
     }
   }
-  const cards = Array.from(document.querySelectorAll("[data-urn],[data-activity-urn],[data-id]"))
-    .filter(node=>["data-urn","data-activity-urn","data-id"].some(attr=>
-      ["activity","share","ugcPost"].some(type=>node.getAttribute(attr)==="urn:li:"+type+":"+id)));
-  for (const card of cards) {
-    if (card.querySelector("article,[role=article],[data-urn^='urn:li:activity:']")) continue;
-    const body = card.querySelector(".update-components-text,.feed-shared-update-v2__description,[data-view-name='feed-commentary'],[data-testid='expandable-text-box']");
-    if (!body) continue;
-    const stamp = card.querySelector("time[datetime]");
+  const ignore = "blockquote,aside,[role=complementary],.comments-comment-item,[data-urn^='urn:li:comment:'],[data-testid='comment-item'],[data-view-name*='comment-thread'],[data-view-name*='reshared'],.update-components-reshared-content";
+  const ownership = "article,[role=article],[data-urn^='urn:li:activity:'],[data-urn^='urn:li:share:'],[data-urn^='urn:li:ugcPost:'],[data-activity-urn],[data-attributed-urn],[data-id^='urn:li:'],[componentkey*='urn:li:']";
+  const normalize = value => value.normalize("NFKC").replace(/\s+/g," ").trim();
+  const prefix = normalize(preview).replace(/(?:…|\.{3})(?:\s*(?:see |show )?more)?$/i,"").trimEnd();
+  const candidates = [];
+  for (const body of document.querySelectorAll(bodySelector)) {
+    if (body.closest(ignore) || body.querySelector(ignore+","+ownership) || !body.getClientRects().length ||
+        body.parentElement?.closest(bodySelector)) continue;
+    const owner = body.closest(ownership);
+    const card = owner || body.parentElement;
+    const owns = node => !node.closest(ignore) && node.closest(ownership)===owner;
+    let exact = false;
+    let differentPost = false;
+    const container = card.parentElement?.closest(ownership);
+    const wrapper = container && !container.matches("article,[role=article]") &&
+      container.querySelectorAll("article,[role=article]").length===1 && card.matches("article,[role=article]");
+    for (const element of wrapper ? [card,container] : [card]) {
+      // A /posts/ share URL and its rendered activity can carry different IDs on the same article.
+      const ids = new Set();
+      for (const attr of ["data-urn","data-activity-urn","data-attributed-urn","data-id","componentkey"]) {
+        const urn = element.getAttribute(attr)?.match(/urn:li:(?:activity|share|ugcPost):(\d{15,21})(?!\d)/);
+        if (urn) ids.add(urn[1]);
+      }
+      if (ids.has(id)) exact = true;
+      else if (ids.size) differentPost = true;
+    }
+    if (differentPost) continue;
+    if (!exact) {
+      const ids = new Set();
+      for (const link of card.querySelectorAll("a[href]")) {
+        if (!owns(link) || link.closest(bodySelector) ||
+            !(link.compareDocumentPosition(body) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
+        const linkedId = postId(link.href);
+        if (linkedId) ids.add(linkedId);
+      }
+      if (ids.size && (ids.size!==1 || !ids.has(id))) continue;
+      exact = ids.has(id);
+    }
+    const text = normalize(body.innerText);
+    if (!exact && (container || prefix.length<50 ||
+        prefix.split(" ").length<8 || !(text===prefix || text.startsWith(prefix+" ")))) continue;
+    candidates.push({body,card,owns,exact});
+  }
+  const anchored = candidates.filter(candidate=>candidate.exact);
+  const possible = anchored.length ? anchored : candidates;
+  let diagnostic = possible.length ? "Several text blocks could belong to the original post." :
+    "Could not identify the original post’s text on this page.";
+  if (possible.length===1) {
+    const {body,card,owns} = possible[0];
+    const stamp = Array.from(card.querySelectorAll("time[datetime]")).find(node=>owns(node) && !node.closest(bodySelector));
     if (!evidence.published && stamp) addDate(stamp.getAttribute("datetime"));
-    const age = card.querySelector(ageSelector);
+    const age = Array.from(card.querySelectorAll(ageSelector)).find(node=>owns(node) && !node.closest(bodySelector));
     if (!evidence.published && age?.getClientRects().length) evidence.age_label = age.innerText;
-    const more = Array.from(card.querySelectorAll("button,[role=button]")).find(button=>
+    const more = Array.from(card.querySelectorAll("button,[role=button]")).find(button=>owns(button) && button.getClientRects().length &&
       /^(?:(?:see|show|read)\s+)?[.…\s]*more(?:,?\s+expand.*)?$/i.test((button.getAttribute("aria-label") || button.innerText || "").trim()));
     if (more && !more.dataset.hiremateExpanded) {
       more.dataset.hiremateExpanded="true";
       more.click();
     }
     const text = body.innerText.trim();
-    if (!more && text && text.length<=30000 && !evidence.text) Object.assign(evidence,{text,content_kind:"full"});
+    const clipped = /(?:…|\.{3})$/.test(text) || (body.clientHeight>0 && body.scrollHeight>body.clientHeight+1 &&
+      ["hidden","clip"].includes(getComputedStyle(body).overflowY));
+    diagnostic = more || clipped ? "LinkedIn still shows a shortened version of the post." :
+      "The original post’s text was empty or too long to import.";
+    if (!more && !clipped && text && text.length<=30000 && !evidence.text) Object.assign(evidence,{text,content_kind:"full"});
   }
-  return {evidence, permalink:resolvingShortLink ? location.href : undefined};
+  return {evidence, diagnostic, permalink:resolvingShortLink ? location.href : undefined};
 }
 
-async function readPosts(allowExpansion=true, ageSelector="time") {
+async function readPosts(allowExpansion=true, ageSelector="time", bodySelector=postBodySelector) {
   delete document.documentElement.dataset.hiremateReadPosition;
   if (!location.pathname.startsWith("/search/results/content")) {
     return {error:"Open LinkedIn, complete sign-in if prompted, then retry from HireMate."};
   }
   const root = document.querySelector("main,[role=main]") || document.body;
-  const bodySelector = ".update-components-text,.feed-shared-update-v2__description,[data-testid='expandable-text-box'],[data-testid='expandable-text'],[data-view-name='feed-commentary']";
   const markerSelector = "a[href*='highlightedUpdateUrn='],a[href*='/feed/update/'],a[href*='/posts/'],[data-urn],[data-activity-urn],[data-id],[componentkey*='urn:li:']";
   const headingSelector = "h1,h2,h3,h4,[role=heading]";
   function directPostLink(value) {
