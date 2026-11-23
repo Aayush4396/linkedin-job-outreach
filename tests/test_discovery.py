@@ -60,6 +60,15 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual(instructions(post, today)[0], expected)
             self.assertEqual(instructions(dict(post, content_kind="snippet"), today)[0], "Unverified lead")
 
+    def test_profile_request_and_linkedin_contact(self):
+        email = "Please send your resume and LinkedIn profile to:\nhiring@example.org"
+        self.assertEqual(instructions(dict(self.post,text=email))[:2], ("Needs draft","hiring@example.org"))
+        for text in ["Interested? Drop me a message or apply using the link in the comments.",
+                     "Connect with me on LinkedIn to apply.", "Send your CV via LinkedIn DM."]:
+            self.assertEqual(instructions(dict(self.post,text=text)), ("Contact on LinkedIn","",""))
+        for text in ["Do not DM me.", "Drop me a message on WhatsApp.", "Include your LinkedIn profile."]:
+            self.assertEqual(instructions(dict(self.post,text=text))[0], "No email listed")
+
     def test_multi_email_uses_action_target(self):
         # A post with a general contact email AND a clear apply-to email:
         # the action-pattern email should win; the footer email must not block it.

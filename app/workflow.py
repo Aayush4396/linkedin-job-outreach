@@ -213,7 +213,9 @@ def resume_fit(post, resume, on_retry=None):
 def draft(post, resume, on_retry=None):
     if cfg.MODEL:
         return generate(post, resume, "Write a four-sentence application grounded only in the résumé "
-                        "and the opening. Never invent experience.", Pitch, on_retry)
+                        "and the opening. Never invent experience, a LinkedIn URL, or personal details. "
+                        "When a LinkedIn profile is requested, include the candidate's LinkedIn URL only "
+                        "if supplied in the résumé.", Pitch, on_retry)
     return Pitch(subject="Application for " + post["title"][:160],
                  body="I’m interested in the " + post["title"] + " opening. Please find my résumé attached.")
 
@@ -301,8 +303,20 @@ def prepare(on_match_progress=None):
     if not resume:
         return
     search = saved_search()
-    eligible = {"Needs draft", "Apply via link", "No email listed", "Check recipients",
+    eligible = {"Needs draft", "Apply via link", "Contact on LinkedIn", "No email listed", "Check recipients",
                 "Check application instructions", "Unverified lead", "Low résumé match"}
+    # Reconsider saved instructions when the parser improves, without rediscovering the post.
+    def reroute(get, put):
+        if get("posts", post["id"]) == post:
+            updated = dict(post, route=route, recipient=recipient, apply_link=link)
+            if post["status"] != "Low résumé match":
+                updated["status"] = route
+            put("posts", post["id"], updated)
+    for post in iter_posts({"No email listed", "Check application instructions", "Low résumé match"}):
+        if post.get("route") in {"No email listed", "Check application instructions"} and linkedin_id(post["url"]):
+            route, recipient, link = instructions(post)
+            if route in {"Needs draft", "Contact on LinkedIn"}:
+                transact(reroute)
     candidates = [
         post for post in iter_posts(eligible)
         if (not fit_is_current(post, resume) or post["status"] == "Needs draft") and search.matches(post)

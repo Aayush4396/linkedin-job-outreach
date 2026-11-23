@@ -43,7 +43,7 @@ el('browserSearch').hidden=!local;
 el('browserHint').hidden=!local || document.documentElement.dataset.hiremateBrowser==='ready';
 el('resume').textContent=data.resume?'My résumé · '+data.resume.name:'Add your résumé';
 el('preview').textContent=data.resume?.text||'';
-const priority=['Ready for review','Check delivery','Queued','Needs draft','Apply via link','Unverified lead','Check application instructions','Check recipients'];
+const priority=['Ready for review','Check delivery','Queued','Needs draft','Contact on LinkedIn','Apply via link','Unverified lead','Check application instructions','Check recipients'];
 const rank=p=>priority.includes(p.status)?priority.indexOf(p.status):priority.length;
 const otherCount=data.posts.filter(p=>rank(p)===priority.length).length;
 el('list').replaceChildren();el('otherPosts').replaceChildren();
@@ -147,7 +147,16 @@ if(p.status==='Unverified lead'){
 }add(c,'h2',p.title);add(c,'p',p.text);
 if(!p.sample){const a=add(c,'a',p.url.startsWith('https://www.linkedin.com/search/results/content/')?'View LinkedIn search':'Original post');a.href=p.url}
 if(p.apply_link && p.status!=='Unverified lead'){const a=add(c,'a',' Open application');a.href=p.apply_link}
+if(p.status==='Contact on LinkedIn'){
+  add(c,'p','Open the original post and select the author to connect or send a message.');
+  const note=add(add(c,'label','Suggested LinkedIn note'),'textarea','');
+  note.value='Hi, I saw your hiring post and I’m interested in the opportunity. Would you be open to discussing the role?';
+  const copy=add(c,'button','Copy note');
+  copy.onclick=async()=>{try{await navigator.clipboard.writeText(note.value);copy.textContent='Copied'}catch{note.focus();note.select()}};
+}
 if(!p.message)continue;
+if(p.status==='Ready for review' && /\blinkedin\s+(?:profile|url)\b/i.test(p.text))
+  add(c,'p','Check that your email includes your LinkedIn profile URL and the other details requested in the post.');
 add(c,'p','To: '+p.recipient+' · Attachment: '+p.filename);
 if(p.status!=='Ready for review'){add(c,'p',p.subject);continue}
 const subject=add(add(c,'label','Subject'),'input','');subject.value=p.subject;

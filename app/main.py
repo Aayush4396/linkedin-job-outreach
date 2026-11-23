@@ -320,7 +320,7 @@ def browser_results(request: Request, posts: list[BrowserPost]):
             current = read("posts", target)
             resume = read("settings", "resume")
             if (resume and current["status"] in {"Needs draft", "Unverified lead", "Apply via link",
-                                                 "Check application instructions", "No email listed", "Check recipients"}
+                                                 "Check application instructions", "No email listed", "Contact on LinkedIn", "Check recipients"}
                     and (current["status"] == "Needs draft" or not fit_is_current(current, resume))):
                 progress(0, 1)
                 assess(current, resume, lambda delay: progress(0, 1, delay))

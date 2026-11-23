@@ -57,7 +57,9 @@ def instructions(post, today=None):
     text = post["text"]
     action = (r"(?:apply(?:\s+(?:by|via)\s+email)?\s+(?:at|to)|"
               r"(?:send|submit|share|email|e-mail|forward)\s+(?:(?:your|their|a|an|updated|latest)\s+)*"
-              r"(?:résumés?|resumes?|cvs?|profiles?|applications?)\s*(?:(?:at|to|via email)\b)?|"
+              r"(?:résumés?|resumes?|cvs?|profiles?|applications?)"
+              r"(?:\s*(?:and|&|along with)\s+(?:your\s+)?LinkedIn\s+(?:profile(?:\s+(?:link|URL))?|URL))?"
+              r"\s*(?:(?:at|to|via email)\b)?|"
               r"(?:application|applications)\s+(?:email|to))")
     # Match the destination in the application instruction, including the next line.
     email = re.findall(r"\b" + action + r"[\s:–—-]*(" + EMAIL.pattern + ")", text, re.I)
@@ -71,5 +73,13 @@ def instructions(post, today=None):
         # Other emails in the post (e.g. a general contact or company footer)
         # do not disqualify it — the application instruction is unambiguous.
         return "Needs draft", addresses.pop(), ""
+    if not addresses and any(
+        re.search(r"\b(?:DM me|message me|drop me a message|send me a (?:direct )?message|"
+                  r"connect with me (?:on|via) LinkedIn|via LinkedIn DM)\b", clause, re.I)
+        and not re.search(r"\b(?:do not|don't|don’t|please avoid|no DMs?)\b|"
+                          r"\b(?:WhatsApp|Telegram|Instagram)\b", clause, re.I)
+        for clause in re.split(r"[.!?;\n]", text)
+    ):
+        return "Contact on LinkedIn", "", ""
     return ("Check application instructions" if all_emails else "No email listed"), "", ""
 
