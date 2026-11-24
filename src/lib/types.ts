@@ -62,6 +62,7 @@ export interface PostRecord {
   fit_model?: string;
   subject?: string;
   message?: string;
+  draft_edited?: boolean;
   resume?: string;
   filename?: string;
   preview?: boolean;

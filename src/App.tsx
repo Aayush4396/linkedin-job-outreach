@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import {
   dispatchQueuedNow,
+  downloadEmailEml,
   fetchDashboard,
   generateEmailDraft,
   runServerScan,
@@ -438,6 +439,26 @@ export default function App() {
       }
     },
     [loadDashboard],
+  );
+
+  const handleDownloadEml = useCallback(
+    async (postId: string, subject: string, message: string) => {
+      setFailedAction(null);
+      try {
+        const result = await downloadEmailEml(postId, { subject, message });
+        setNotice(
+          `Downloaded ${result.filename} with your résumé attached. Open it in Mail, Outlook, or Thunderbird to send.`,
+        );
+      } catch (error) {
+        const msg =
+          error instanceof Error ? error.message : "Could not generate the .eml email draft.";
+        setFailedAction({
+          message: msg,
+          retry: () => handleDownloadEml(postId, subject, message),
+        });
+      }
+    },
+    [],
   );
 
   const handleDispatchNow = useCallback(async () => {
@@ -985,12 +1006,13 @@ export default function App() {
                     <PostCard
                       key={post.id}
                       post={post}
-                      hasResume={Boolean(data?.resume)}
+                      activeResume={data?.resume ?? null}
                       hideSharedMissingNote={Boolean(sharedUnverifiedMissing)}
                       onDraftAction={handleDraftAction}
                       onDeliveryAction={handleDeliveryAction}
                       onOutreachAction={handleOutreachAction}
                       onGenerateEmailDraft={handleGenerateEmailDraft}
+                      onDownloadEml={handleDownloadEml}
                     />
                   ))}
                 </section>

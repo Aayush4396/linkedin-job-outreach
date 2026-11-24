@@ -1,14 +1,26 @@
 import { useEffect, useState } from "react";
-import { Check, CheckCircle2, Copy, ExternalLink, Mail, RotateCcw, Sparkles } from "lucide-react";
+import {
+  Check,
+  CheckCircle2,
+  Copy,
+  Download,
+  ExternalLink,
+  Mail,
+  Paperclip,
+  RotateCcw,
+  Sparkles,
+} from "lucide-react";
+import { resumeDownloadUrl } from "../lib/api";
 import {
   buildMailtoHref,
   extractEmails,
   formatPostTimestamp,
   isActionableEmail,
+  isDraftFromOlderResume,
   isSafeHttpUrl,
   missingDetails,
 } from "../lib/postDiscovery";
-import type { LinkedInActionType, PostRecord, PostStatus } from "../lib/types";
+import type { LinkedInActionType, PostRecord, PostStatus, ResumeRecord } from "../lib/types";
 
 export interface OutreachActionPayload {
   action: "save" | "mark_applied" | "skip" | "reopen";
@@ -19,7 +31,7 @@ export interface OutreachActionPayload {
 
 interface PostCardProps {
   post: PostRecord;
-  hasResume: boolean;
+  activeResume: ResumeRecord | null;
   hideSharedMissingNote: boolean;
   onDraftAction: (
     postId: string,
@@ -30,6 +42,7 @@ interface PostCardProps {
   onDeliveryAction: (postId: string, action: "mark_sent" | "requeue") => Promise<void>;
   onOutreachAction: (postId: string, payload: OutreachActionPayload) => Promise<void>;
   onGenerateEmailDraft: (postId: string) => Promise<void>;
+  onDownloadEml: (postId: string, subject: string, message: string) => Promise<void>;
 }
 
 const DEFAULT_DM_NOTE =
@@ -99,13 +112,15 @@ function statusExplanation(status: PostStatus, hasResume: boolean): string | nul
 
 export function PostCard({
   post,
-  hasResume,
+  activeResume,
   hideSharedMissingNote,
   onDraftAction,
   onDeliveryAction,
   onOutreachAction,
   onGenerateEmailDraft,
+  onDownloadEml,
 }: PostCardProps) {
+  const hasResume = Boolean(activeResume);
   const [subject, setSubject] = useState(post.subject ?? "");
   const [message, setMessage] = useState(post.message ?? "");
 
@@ -170,6 +185,10 @@ export function PostCard({
     post.message && detectedEmail
       ? buildMailtoHref(detectedEmail, activeEmailSubject, activeEmailBody)
       : null;
+  const draftFromOlderResume = isDraftFromOlderResume(post, activeResume);
+  const attachedFilename = post.filename || activeResume?.name || "";
+  const attachedVersion = post.resume || activeResume?.version || "";
+  const attachmentDownloadHref = attachedVersion ? resumeDownloadUrl(attachedVersion) : null;
 
   function updateActiveLinkedInText(nextValue: string) {
     if (channel === "dm") setDmDraft(nextValue);
@@ -238,6 +257,15 @@ export function PostCard({
     setBusyAction("draft_email");
     try {
       await onGenerateEmailDraft(post.id);
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleDownloadEml() {
+    setBusyAction("download_eml");
+    try {
+      await onDownloadEml(post.id, activeEmailSubject, activeEmailBody);
     } finally {
       setBusyAction(null);
     }
@@ -625,17 +653,35 @@ export function PostCard({
       {/* Draft review / read-only summary */}
       {post.message && (
         <div className="pt-3 border-t border-slate-100 space-y-3">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-600">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
             <span>
-              To: <strong className="font-mono-tabular text-slate-900">{detectedEmail || post.recipient}</strong>
+              To:{" "}
+              <strong className="font-mono-tabular text-slate-900">
+                {detectedEmail || post.recipient}
+              </strong>
             </span>
-            {post.filename && (
-              <>
-                <span aria-hidden="true">·</span>
-                <span>Attachment: {post.filename}</span>
-              </>
+            {attachedFilename && attachmentDownloadHref ? (
+              <a
+                href={attachmentDownloadHref}
+                download={attachedFilename}
+                className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-800 hover:bg-slate-100 transition-colors"
+                title="Download attached résumé file"
+              >
+                <Paperclip className="w-3.5 h-3.5 text-[#423499] shrink-0" aria-hidden="true" />
+                <span className="truncate max-w-[240px]">{attachedFilename}</span>
+                <Download className="w-3 h-3 text-slate-500 shrink-0" aria-hidden="true" />
+              </a>
+            ) : (
+              <span className="text-amber-700">No résumé attached — upload one in My résumé</span>
             )}
           </div>
+
+          {draftFromOlderResume && activeResume && (
+            <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              Drafted from an earlier résumé ({post.filename ?? "previous file"}). Your manual edits
+              were preserved—click <strong>Redraft</strong> to regenerate using {activeResume.name}.
+            </p>
+          )}
 
           {asksForLinkedIn && (
             <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
@@ -661,7 +707,7 @@ export function PostCard({
                 <textarea
                   value={message}
                   maxLength={6000}
-                  rows={5}
+                  rows={8}
                   onChange={(e) => setMessage(e.target.value)}
                   className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 leading-relaxed"
                 />
@@ -675,9 +721,26 @@ export function PostCard({
                 >
                   {busyAction === "approve" ? "Approving…" : "Approve and queue"}
                 </button>
+                <button
+                  type="button"
+                  disabled={busyAction !== null || !detectedEmail}
+                  onClick={handleDownloadEml}
+                  title="Download a ready-to-send .eml draft with your résumé attached"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-300 bg-white text-slate-900 hover:bg-slate-50 disabled:opacity-50 transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  <Paperclip className="w-3.5 h-3.5 text-[#423499]" aria-hidden="true" />
+                  <span>
+                    {busyAction === "download_eml"
+                      ? "Preparing .eml…"
+                      : attachedFilename
+                        ? "Download .eml (with résumé)"
+                        : "Download .eml"}
+                  </span>
+                </button>
                 {mailtoHref && (
                   <a
                     href={mailtoHref}
+                    title="Opens your default email app with subject and body (attach résumé manually, or use Download .eml for automatic attachment)"
                     className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg border border-slate-300 bg-white text-slate-800 hover:bg-slate-50 transition-colors whitespace-nowrap"
                   >
                     <Mail className="w-3.5 h-3.5" aria-hidden="true" />
@@ -737,6 +800,23 @@ export function PostCard({
                 <p className="whitespace-pre-wrap text-slate-600">{post.message}</p>
               </div>
               <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                {detectedEmail && (
+                  <button
+                    type="button"
+                    disabled={busyAction !== null}
+                    onClick={handleDownloadEml}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-300 bg-white text-slate-900 hover:bg-slate-50 disabled:opacity-50 cursor-pointer whitespace-nowrap"
+                  >
+                    <Paperclip className="w-3.5 h-3.5 text-[#423499]" aria-hidden="true" />
+                    <span>
+                      {busyAction === "download_eml"
+                        ? "Preparing .eml…"
+                        : attachedFilename
+                          ? "Download .eml (with résumé)"
+                          : "Download .eml"}
+                    </span>
+                  </button>
+                )}
                 {mailtoHref && (
                   <a
                     href={mailtoHref}

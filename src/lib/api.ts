@@ -135,4 +135,47 @@ export function generateEmailDraft(
   );
 }
 
+export function resumeDownloadUrl(version?: string): string {
+  if (version) {
+    return `/api/resume/download?version=${encodeURIComponent(version)}`;
+  }
+  return "/api/resume/download";
+}
+
+export async function downloadEmailEml(
+  id: string,
+  payload?: { subject?: string; message?: string },
+): Promise<{ filename: string }> {
+  const response = await fetch(`/api/posts/${id}/eml`, {
+    method: "POST",
+    headers: { ...BASE_HEADERS, "Content-Type": "application/json" },
+    body: JSON.stringify(payload ?? {}),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => null);
+    const detail =
+      data && typeof data === "object" && typeof (data as { detail?: unknown }).detail === "string"
+        ? (data as { detail: string }).detail
+        : "Could not download .eml draft.";
+    throw new ApiError(detail, response.status);
+  }
+  const disposition = response.headers.get("content-disposition") ?? "";
+  const nameMatch = disposition.match(/filename="([^"]+)"/i);
+  const filename = nameMatch?.[1] || "application-draft.eml";
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  try {
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  }
+  return { filename };
+}
+
+
 

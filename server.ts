@@ -17,6 +17,12 @@ import {
 } from "./src/lib/postDiscovery";
 import type { DashboardPayload, PostRecord, ResumeRecord, ScanRecord } from "./src/lib/types";
 import { loadConfig } from "./server/config";
+import {
+  buildEmlDraft,
+  buildEmlFilename,
+  mimeTypeForFilename,
+  sanitizeAttachmentFilename,
+} from "./server/emlBuilder";
 import { parseAndSaveResume } from "./server/resumeParser";
 import { HireMateStore } from "./server/storage";
 import {
@@ -30,6 +36,7 @@ import {
   fitIsCurrent,
   getSavedSearch,
   localIsoDate,
+  normalizeExistingEmailDrafts,
   prepareMatches,
   reconcileEmailLeads,
   reviewDraft,
@@ -71,6 +78,15 @@ const editDraftSchema = z.object({
     .refine((v) => !/[\r\n]/.test(v), "Subject must be a single line."),
   message: z.string().min(1, "Email body cannot be empty.").max(6000, "Email body is too long."),
   action: z.enum(["save", "approve", "skip"]),
+});
+
+const emlDraftSchema = z.object({
+  subject: z
+    .string()
+    .max(200, "Subject is too long.")
+    .refine((v) => !/[\r\n]/.test(v), "Subject must be a single line.")
+    .optional(),
+  message: z.string().max(6000, "Email body is too long.").optional(),
 });
 
 const approvalSchema = z.object({
@@ -370,6 +386,52 @@ async function createApp() {
     },
   );
 
+  app.get("/api/resume/download", (req, res) => {
+    const activeResume = store.read<ResumeRecord>("settings", "resume");
+    const requestedVersion =
+      typeof req.query.version === "string" ? req.query.version.trim() : "";
+
+    let versionToRead = activeResume?.version ?? "";
+    let downloadName = activeResume?.name ?? "resume.pdf";
+
+    if (requestedVersion) {
+      if (!/^[a-f0-9]{64}\.(?:pdf|docx|txt)$/i.test(requestedVersion)) {
+        res.status(400).json({ detail: "Invalid résumé identifier." });
+        return;
+      }
+      if (activeResume && activeResume.version === requestedVersion) {
+        versionToRead = activeResume.version;
+        downloadName = activeResume.name;
+      } else {
+        const matchingPost = store
+          .all<PostRecord>("posts")
+          .find((p) => p.resume === requestedVersion);
+        if (!matchingPost) {
+          res.status(404).json({ detail: "Requested résumé file was not found." });
+          return;
+        }
+        versionToRead = requestedVersion;
+        downloadName = matchingPost.filename || activeResume?.name || "resume.pdf";
+      }
+    }
+
+    if (!versionToRead) {
+      res.status(404).json({ detail: "No résumé has been uploaded yet." });
+      return;
+    }
+
+    const bytes = store.readResumeBytes(versionToRead);
+    if (!bytes) {
+      res.status(404).json({ detail: "Résumé file is no longer available on disk." });
+      return;
+    }
+
+    const safeFilename = sanitizeAttachmentFilename(downloadName);
+    res.setHeader("Content-Type", mimeTypeForFilename(safeFilename));
+    res.setHeader("Content-Disposition", `attachment; filename="${safeFilename}"`);
+    res.send(bytes);
+  });
+
   app.post("/api/posts/:uid", (req, res) => {
     const uid = String(req.params.uid ?? "");
     if (!/^[a-f0-9]{64}$/i.test(uid)) {
@@ -466,6 +528,74 @@ async function createApp() {
         /not found|upload your résumé|no actionable email/i.test(message);
       const isQuota = /\b429\b|RESOURCE_EXHAUSTED/i.test(message);
       res.status(isUserInput ? 422 : isQuota ? 429 : 502).json({ detail: message });
+    }
+  });
+
+  app.post("/api/posts/:uid/eml", (req, res) => {
+    const uid = String(req.params.uid ?? "");
+    if (!/^[a-f0-9]{64}$/i.test(uid)) {
+      res.status(404).json({ detail: "Lead not found." });
+      return;
+    }
+
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const parsed = emlDraftSchema.safeParse(body);
+    if (!parsed.success) {
+      res.status(400).json({ detail: parsed.error.issues[0]?.message ?? "Invalid email draft." });
+      return;
+    }
+
+    const post = store.read<PostRecord>("posts", uid);
+    if (!post) {
+      res.status(404).json({ detail: "Lead not found." });
+      return;
+    }
+
+    const subject = (parsed.data.subject ?? post.subject ?? "").trim();
+    const message = (parsed.data.message ?? post.message ?? "").trim();
+    if (!message) {
+      res.status(422).json({ detail: "Draft an email before downloading the .eml file." });
+      return;
+    }
+
+    const recipient = (post.recipient || extractEmails(post.text)[0] || "").trim();
+    const activeResume = store.read<ResumeRecord>("settings", "resume");
+
+    let attachment: { filename: string; bytes: Buffer } | null = null;
+    if (post.resume) {
+      const postResumeBytes = store.readResumeBytes(post.resume);
+      if (postResumeBytes) {
+        attachment = {
+          filename: post.filename || activeResume?.name || "resume.pdf",
+          bytes: postResumeBytes,
+        };
+      }
+    }
+    if (!attachment && activeResume) {
+      const activeBytes = store.readResumeBytes(activeResume.version);
+      if (activeBytes) {
+        attachment = {
+          filename: activeResume.name,
+          bytes: activeBytes,
+        };
+      }
+    }
+
+    try {
+      const emlBytes = buildEmlDraft({
+        to: recipient,
+        subject: subject || `Application for ${post.title}`,
+        body: message,
+        attachment,
+      });
+      const emlFilename = buildEmlFilename(subject || post.title, recipient);
+      res.setHeader("Content-Type", "message/rfc822");
+      res.setHeader("Content-Disposition", `attachment; filename="${emlFilename}"`);
+      res.send(emlBytes);
+    } catch (error) {
+      const detail =
+        error instanceof Error ? error.message : "Could not generate .eml draft file.";
+      res.status(422).json({ detail });
     }
   });
 
@@ -714,8 +844,10 @@ async function createApp() {
     });
   }
 
-  // Upgrade any already-saved posts containing an actionable email into Needs draft.
+  // Upgrade any already-saved posts containing an actionable email into Needs draft,
+  // and ensure unedited Ready for review drafts include Hello <Name> and Regards, <User>.
   const upgradedEmailLeads = reconcileEmailLeads(store, config);
+  normalizeExistingEmailDrafts(store);
 
   app.listen(config.port, config.host, () => {
     console.log(`HireMate server listening on http://${config.host}:${config.port}`);

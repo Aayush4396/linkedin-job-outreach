@@ -1,6 +1,9 @@
 import crypto from "node:crypto";
 import {
+  extractCandidateName,
   extractEmails,
+  extractRecipientName,
+  formatEmailDraftBody,
   instructions,
   isActionableEmail,
   isLinkedInSearch,
@@ -10,6 +13,7 @@ import {
   linkedinTimestampFromUrl,
   matchesSearch,
   normalizeSearchSettings,
+  shouldRefreshDraftOnResumeChange,
   validateIncomingPosts,
 } from "../src/lib/postDiscovery";
 import type {
@@ -220,7 +224,8 @@ export async function assessPost(
   resume: ResumeRecord,
   onRetry?: (delaySeconds: number) => void,
 ): Promise<void> {
-  const route = post.route ?? post.status;
+  const rawRoute = post.route ?? post.status;
+  const route: PostStatus = rawRoute === "Ready for review" ? "Needs draft" : rawRoute;
   let fit: { relevant: boolean; reason: string; model?: string };
 
   if (post.status === "Needs draft" && fitIsCurrent(post, resume) && post.fit_reason) {
@@ -245,8 +250,18 @@ export async function assessPost(
     if (!current || !activeResume || activeResume.version !== resume.version) {
       return;
     }
+    // Never overwrite a draft the user manually edited while re-matching ran.
+    if (current.status === "Ready for review" && current.draft_edited) {
+      return;
+    }
 
     let status: PostStatus = fit.relevant ? route : "Low résumé match";
+    if (!fit.relevant && current.status === "Ready for review") {
+      delete current.subject;
+      delete current.message;
+      delete current.draft_edited;
+    }
+
     if (pitch) {
       const recipientKey = hashKey(current.recipient);
       const owner = get<{ post: string }>("recipients", recipientKey);
@@ -260,6 +275,7 @@ export async function assessPost(
         status = pref.required ? "Ready for review" : "Queued";
         current.subject = pitch.subject;
         current.message = pitch.body;
+        delete current.draft_edited;
         current.resume = resume.version;
         current.filename = resume.name;
         current.preview = config.dryRun;
@@ -373,7 +389,7 @@ export async function draftEmailForPost(
     fitModel = fit.model;
   }
 
-  const pitch = await draftApplicationPitch(config, post, resume);
+  const pitch = await draftApplicationPitch(config, { ...post, recipient }, resume);
 
   return store.transact((get, put) => {
     const current = get<PostRecord>("posts", uid);
@@ -396,10 +412,45 @@ export async function draftEmailForPost(
       ...(fitModel ? { fit_model: fitModel } : {}),
       apply_link: current.apply_link || routed.applyLink,
     };
+    delete updated.draft_edited;
     put("recipients", hashKey(recipient), { post: current.id });
     put("posts", current.id, updated as unknown as Record<string, unknown>);
     return updated;
   });
+}
+
+export function normalizeExistingEmailDrafts(store: HireMateStore): number {
+  const resume = store.read<ResumeRecord>("settings", "resume");
+  const candidateName = extractCandidateName(resume);
+  const allPosts = store.all<PostRecord>("posts");
+  let updatedCount = 0;
+
+  for (const post of allPosts) {
+    if (post.status !== "Ready for review" || !post.message || post.draft_edited) continue;
+    const hasGreeting = /^(?:hello|hi|dear)\b/i.test(post.message.trim());
+    const hasSignOff = /\bregards,\s*(?:\n|$)/i.test(post.message.trim());
+    if (hasGreeting && hasSignOff) continue;
+
+    const recipientName = extractRecipientName(post);
+    const formatted = formatEmailDraftBody(post.message, recipientName, candidateName);
+    if (formatted === post.message) continue;
+
+    store.transact((get, put) => {
+      const current = get<PostRecord>("posts", post.id);
+      if (!current || current.status !== "Ready for review" || current.draft_edited || !current.message) {
+        return;
+      }
+      const next: PostRecord = {
+        ...current,
+        message: formatted,
+        ...(resume && !current.filename ? { filename: resume.name, resume: resume.version } : {}),
+      };
+      put("posts", current.id, next as unknown as Record<string, unknown>);
+      updatedCount += 1;
+    });
+  }
+
+  return updatedCount;
 }
 
 export async function prepareMatches(
@@ -414,14 +465,18 @@ export async function prepareMatches(
 
   const search = getSavedSearch(store);
   const allPosts = store.all<PostRecord>("posts");
-  const candidates = allPosts.filter(
-    (post) =>
-      ELIGIBLE_FOR_PREPARE.has(post.status) &&
-      (!fitIsCurrent(post, resume) ||
-        post.status === "Needs draft" ||
-        (post.status === "Contact on LinkedIn" && !post.linkedin_dm_draft)) &&
-      ((post.status === "Needs draft" && Boolean(post.recipient)) || matchesSearch(search, post)),
-  );
+  const candidates = allPosts.filter((post) => {
+    if (post.status === "Ready for review") {
+      return shouldRefreshDraftOnResumeChange(post, resume, FIT_POLICY);
+    }
+    if (!ELIGIBLE_FOR_PREPARE.has(post.status)) return false;
+    const needsWork =
+      !fitIsCurrent(post, resume) ||
+      post.status === "Needs draft" ||
+      (post.status === "Contact on LinkedIn" && !post.linkedin_dm_draft);
+    if (!needsWork) return false;
+    return (post.status === "Needs draft" && Boolean(post.recipient)) || matchesSearch(search, post);
+  });
 
   if (onMatchProgress) {
     onMatchProgress(0, candidates.length, 0);
@@ -558,11 +613,16 @@ export function reviewDraft(
     if (!post || post.status !== "Ready for review") {
       throw new Error("This draft is no longer awaiting review.");
     }
+    const cleanSubject = subject.replace(/[\r\n]+/g, " ").trim();
+    const cleanMessage = message.trim();
+    const textChanged =
+      cleanSubject !== (post.subject ?? "") || cleanMessage !== (post.message ?? "");
     const updated: PostRecord = {
       ...post,
-      subject: subject.replace(/[\r\n]+/g, " ").trim(),
-      message: message.trim(),
+      subject: cleanSubject,
+      message: cleanMessage,
       status: nextStatusMap[action],
+      ...(action === "save" || textChanged ? { draft_edited: true } : {}),
     };
     put("posts", uid, updated as unknown as Record<string, unknown>);
     return updated;

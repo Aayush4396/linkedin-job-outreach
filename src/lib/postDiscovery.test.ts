@@ -5,12 +5,17 @@ import {
   buildMailtoHref,
   buildSearchQuery,
   buildSearchUrl,
+  extractCandidateName,
+  extractRecipientName,
+  formatEmailDraftBody,
   formatPostTimestamp,
   instructions,
+  isDraftFromOlderResume,
   isSafeFeedUrl,
   linkedinId,
   linkedinTimestampFromUrl,
   matchesSearch,
+  shouldRefreshDraftOnResumeChange,
   stripUndefined,
   validateIncomingPosts,
 } from "./postDiscovery";
@@ -275,6 +280,110 @@ test("buildMailtoHref encodes subject and body safely and rejects invalid or nor
   assert.equal(buildMailtoHref("no-reply@example.org", "Hi", "Body"), null);
   assert.equal(buildMailtoHref("not-an-email", "Hi", "Body"), null);
 });
+
+test("resume re-upload refreshes unedited Ready for review drafts while preserving edited drafts", () => {
+  const oldResume = { version: "old-hash.pdf" };
+  const newResume = { version: "new-hash.pdf" };
+  const policy = "role-and-skills-v1";
+
+  const uneditedDraft = {
+    status: "Ready for review" as const,
+    resume: oldResume.version,
+    message: "Original AI draft",
+    fit_resume: oldResume.version,
+    fit_policy: policy,
+  };
+  assert.equal(shouldRefreshDraftOnResumeChange(uneditedDraft, newResume, policy), true);
+  assert.equal(shouldRefreshDraftOnResumeChange(uneditedDraft, oldResume, policy), false);
+  assert.equal(isDraftFromOlderResume(uneditedDraft, newResume), true);
+  assert.equal(isDraftFromOlderResume(uneditedDraft, oldResume), false);
+
+  const editedDraft = {
+    ...uneditedDraft,
+    draft_edited: true,
+  };
+  assert.equal(shouldRefreshDraftOnResumeChange(editedDraft, newResume, policy), false);
+  assert.equal(isDraftFromOlderResume(editedDraft, newResume), true);
+
+  const sentLead = {
+    status: "Sent" as const,
+    resume: oldResume.version,
+    message: "Sent email",
+    fit_resume: oldResume.version,
+    fit_policy: policy,
+  };
+  assert.equal(shouldRefreshDraftOnResumeChange(sentLead, newResume, policy), false);
+  assert.equal(isDraftFromOlderResume(sentLead, newResume), false);
+});
+
+test("extractRecipientName, extractCandidateName, and formatEmailDraftBody produce Hello <Name> and Regards, <User>", () => {
+  assert.equal(
+    extractRecipientName({
+      recipient: "lavanya.s@prophecytechs.com",
+      url: "https://www.linkedin.com/posts/lavanya-s-4473b1298_hiring-7530529042857361408-EG7s/",
+    }),
+    "Lavanya",
+  );
+  assert.equal(
+    extractRecipientName({
+      recipient: "glowhorizonconsulting@gmail.com",
+      url: "https://www.linkedin.com/posts/preeti-nagpal-910589411_hiring-7530512976001474560-uyNk/",
+    }),
+    "Preeti",
+  );
+  assert.equal(
+    extractRecipientName({
+      recipient: "hr.ananya@acme.io",
+      url: "https://example.org/jobs/1",
+    }),
+    "Ananya",
+  );
+  assert.equal(
+    extractRecipientName({
+      recipient: "careers@acme.io",
+      url: "https://www.linkedin.com/posts/hiring-genai-7530618133628338176-5JvO/",
+    }),
+    null,
+  );
+
+  assert.equal(
+    extractCandidateName({
+      name: "Aayush_Gupta_Resume.pdf",
+      text: "AAYUSH GUPTA\nLead Data Scientist",
+    }),
+    "Aayush Gupta",
+  );
+  assert.equal(
+    extractCandidateName({
+      name: "resume_final.pdf",
+      text: "PRIYA SHARMA\nMachine Learning Engineer",
+    }),
+    "Priya Sharma",
+  );
+
+  const formatted = formatEmailDraftBody(
+    "I am writing to apply for the GenAI Engineer role.",
+    "Lavanya",
+    "Aayush Gupta",
+  );
+  assert.equal(
+    formatted,
+    "Hello Lavanya,\n\nI am writing to apply for the GenAI Engineer role.\n\nRegards,\nAayush Gupta",
+  );
+
+  // Normalizes existing greeting/sign-off without duplicating them
+  const normalized = formatEmailDraftBody(
+    "Hi there,\n\nMy background fits well.\n\nBest regards,\nAayush",
+    null,
+    "Aayush Gupta",
+  );
+  assert.equal(
+    normalized,
+    "Hello Hiring Team,\n\nMy background fits well.\n\nRegards,\nAayush Gupta",
+  );
+});
+
+
 
 
 

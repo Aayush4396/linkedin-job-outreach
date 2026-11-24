@@ -4,6 +4,7 @@ import type {
   PostRecord,
   PostStatus,
   RawPostInput,
+  ResumeRecord,
   SearchSettings,
   WorkplaceChoice,
 } from "./types";
@@ -611,3 +612,254 @@ export function missingDetails(post: PostRecord): string {
   }
   return missing.join(", ");
 }
+
+export function isDraftFromOlderResume(
+  post: Pick<PostRecord, "status" | "resume" | "message">,
+  activeResume: Pick<ResumeRecord, "version"> | null | undefined,
+): boolean {
+  if (post.status !== "Ready for review" || !post.message) return false;
+  if (!activeResume?.version || !post.resume) return false;
+  return post.resume !== activeResume.version;
+}
+
+export function shouldRefreshDraftOnResumeChange(
+  post: Pick<PostRecord, "status" | "resume" | "draft_edited" | "fit_resume" | "fit_policy">,
+  activeResume: Pick<ResumeRecord, "version">,
+  fitPolicy: string,
+): boolean {
+  if (post.status !== "Ready for review") return false;
+  if (post.draft_edited) return false;
+  return (
+    post.resume !== activeResume.version ||
+    post.fit_resume !== activeResume.version ||
+    post.fit_policy !== fitPolicy
+  );
+}
+
+const GENERIC_RECIPIENT_TOKENS = new Set([
+  "hr",
+  "jobs",
+  "job",
+  "hiring",
+  "career",
+  "careers",
+  "talent",
+  "recruit",
+  "recruiter",
+  "recruiters",
+  "recruiting",
+  "recruitment",
+  "apply",
+  "application",
+  "applications",
+  "team",
+  "info",
+  "hello",
+  "hi",
+  "contact",
+  "admin",
+  "support",
+  "sales",
+  "office",
+  "mail",
+  "email",
+  "resume",
+  "resumes",
+  "cv",
+  "people",
+  "work",
+  "we",
+  "our",
+  "urgent",
+  "open",
+  "opening",
+  "openings",
+  "position",
+  "positions",
+  "role",
+  "roles",
+  "looking",
+  "staffing",
+  "consulting",
+  "consultancy",
+  "solutions",
+  "services",
+  "careersindia",
+  "hrteam",
+  "talentacquisition",
+]);
+
+const COMPANY_LOCALPART_HINT =
+  /(?:consult|solution|staffing|recruit|career|hiring|talent|services|systems|digital|tech|labs|studio|agency|ventures|group|global|india|corp|inc|llc|ltd|hr$)/i;
+
+const RESUME_NOISE_WORDS = new Set([
+  "resume",
+  "résumé",
+  "cv",
+  "curriculum",
+  "vitae",
+  "updated",
+  "latest",
+  "final",
+  "new",
+  "draft",
+  "copy",
+  "profile",
+  "summary",
+  "engineer",
+  "developer",
+  "scientist",
+  "manager",
+  "analyst",
+  "architect",
+  "consultant",
+  "lead",
+  "senior",
+  "junior",
+  "staff",
+  "principal",
+  "ai",
+  "ml",
+  "genai",
+  "data",
+  "software",
+  "full",
+  "stack",
+  "backend",
+  "frontend",
+  "pdf",
+  "docx",
+  "txt",
+]);
+
+function toTitleCase(word: string): string {
+  const lower = word.toLowerCase();
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
+}
+
+function cleanNameToken(raw: string): string | null {
+  const cleaned = raw.replace(/[^a-zA-Z]/g, "");
+  if (cleaned.length < 2 || cleaned.length > 20) return null;
+  if (GENERIC_RECIPIENT_TOKENS.has(cleaned.toLowerCase())) return null;
+  return toTitleCase(cleaned);
+}
+
+export function extractRecipientName(
+  post: Pick<PostRecord, "url" | "recipient">,
+): string | null {
+  // 1. Personal email address (e.g. lavanya.s@..., smita.rai@..., hatim.kagdi@...)
+  const recipient = (post.recipient ?? "").trim().toLowerCase();
+  if (recipient && recipient.includes("@")) {
+    const localPart = recipient.split("@")[0];
+    if (localPart && !COMPANY_LOCALPART_HINT.test(localPart)) {
+      const segments = localPart.split(/[._-]+/).filter(Boolean);
+      if (segments.length >= 2) {
+        for (const segment of segments) {
+          const candidate = cleanNameToken(segment);
+          if (candidate) return candidate;
+        }
+      } else if (segments.length === 1 && segments[0].length <= 14) {
+        const single = cleanNameToken(segments[0]);
+        if (single) return single;
+      }
+    }
+  }
+
+  // 2. LinkedIn post author slug (e.g. /posts/preeti-nagpal-910589411_hiring-...)
+  if (post.url) {
+    try {
+      const parsed = new URL(post.url);
+      if (isLinkedInUrl(post.url)) {
+        const slugMatch = parsed.pathname.match(/^\/posts\/([a-z0-9-]+)_/i);
+        if (slugMatch?.[1]) {
+          const tokens = slugMatch[1].split("-").filter(Boolean);
+          const firstRaw = tokens[0]?.toLowerCase() ?? "";
+          if (
+            tokens.length >= 2 &&
+            firstRaw &&
+            !GENERIC_RECIPIENT_TOKENS.has(firstRaw) &&
+            !COMPANY_LOCALPART_HINT.test(slugMatch[1])
+          ) {
+            const first = cleanNameToken(tokens[0]);
+            if (first) return first;
+          }
+        }
+      }
+    } catch {
+      // Ignore invalid URLs.
+    }
+  }
+
+  return null;
+}
+
+export function extractCandidateName(
+  resume: Pick<ResumeRecord, "name" | "text"> | null | undefined,
+): string {
+  if (!resume) return "";
+
+  // 1. Filename (e.g. "Aayush_Gupta_Resume.pdf" -> "Aayush Gupta")
+  const base = (resume.name ?? "").replace(/\.[^.]+$/, "");
+  const fileTokens = base
+    .split(/[\s._-]+/)
+    .map((t) => t.replace(/[^a-zA-Z]/g, ""))
+    .filter((t) => t.length >= 2 && !RESUME_NOISE_WORDS.has(t.toLowerCase()));
+  if (fileTokens.length >= 2 && fileTokens.length <= 3) {
+    return fileTokens.map(toTitleCase).join(" ");
+  }
+
+  // 2. Opening name header in résumé text (e.g. "AAYUSH GUPTA AI Engineer...")
+  const firstLine = (resume.text ?? "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .find(Boolean);
+  if (firstLine) {
+    const words = firstLine.split(/\s+/).slice(0, 6);
+    const nameParts: string[] = [];
+    for (const rawWord of words) {
+      const cleaned = rawWord.replace(/[^a-zA-Z'-]/g, "");
+      if (!cleaned || cleaned.length < 2 || cleaned.length > 20) break;
+      if (RESUME_NOISE_WORDS.has(cleaned.toLowerCase())) break;
+      if (!/^[A-Z]/.test(cleaned)) break;
+      nameParts.push(toTitleCase(cleaned));
+      if (nameParts.length === 3) break;
+    }
+    if (nameParts.length >= 2) {
+      return nameParts.join(" ");
+    }
+  }
+
+  if (fileTokens.length === 1) {
+    return toTitleCase(fileTokens[0]);
+  }
+
+  return "";
+}
+
+export function formatEmailDraftBody(
+  rawBody: string,
+  recipientName: string | null,
+  candidateName: string,
+): string {
+  let core = rawBody.replace(/\r\n/g, "\n").trim();
+
+  // Remove any existing leading greeting line so we apply a consistent "Hello <Name>," greeting.
+  core = core.replace(
+    /^(?:hello|hi|hey|dear|greetings)\b[^\n]{0,60}[,!:–—-]?\s*(?:\n\s*)*/i,
+    "",
+  );
+
+  // Remove any existing trailing sign-off block so we apply a consistent "Regards,\n<Name>" ending.
+  core = core.replace(
+    /(?:\n\s*)+(?:(?:best|warm|kind)\s+)?(?:regards|sincerely|thanks(?:\s+and\s+regards)?|thank\s+you|best(?:\s+wishes)?|cheers)[,!]?\s*(?:\n[^\n]{0,80}){0,2}\s*$/i,
+    "",
+  );
+
+  core = core.trim();
+  const greeting = `Hello ${recipientName || "Hiring Team"},`;
+  const signOff = candidateName ? `Regards,\n${candidateName}` : "Regards,";
+
+  return `${greeting}\n\n${core}\n\n${signOff}`;
+}
+
+
