@@ -1,6 +1,13 @@
 # HireMate
 
-HireMate discovers hiring posts from LinkedIn (via the Chrome extension), an authorized HTTPS JSON feed, or direct manual paste; evaluates role fit against your uploaded résumé using server-side Gemini AI; and drafts editable, reviewable application outreach.
+HireMate discovers hiring posts from LinkedIn (via the Chrome extension), an authorized HTTPS JSON feed, or direct manual paste; evaluates role fit against your uploaded résumé using server-side Gemini AI; and drafts editable, reviewable outreach across email and LinkedIn.
+
+## Key Capabilities
+
+- **Automatic Email Drafting**: Any verified hiring post containing an actionable email address (excluding `no-reply@` / `mailer-daemon@`) automatically receives a résumé-grounded subject and body under **Ready for review**. Each email card supports **Approve and queue**, **Open in email app** (pre-filled `mailto:` link), **Copy email**, **Save edits**, **Redraft**, and **Skip**—and any email lead without a draft can be drafted on demand.
+- **Assisted LinkedIn Apply (DM / Connect / Comment)**: Posts asking candidates to DM, send a connection request, or comment (including requested keywords such as `Comment "AI"`) generate three tailored options—a **DM**, a **Connect note** enforced at LinkedIn's 300-character limit with a live counter, and a public-safe **Comment** (never exposing personal email/phone). Use **Copy & open post** to paste directly on LinkedIn, then **Mark as applied** (or **Reopen lead** later).
+- **Exact Post Timestamps & Chronological Sorting**: Every post card displays its local publication date, time, and relative age (with exact UTC ISO timestamp on hover), decoded directly from LinkedIn 64-bit activity IDs, sorting same-day posts newest-first.
+- **Account-Safe Discovery**: Server-side `li_at` cookie scraping is intentionally not used. Live LinkedIn discovery runs exclusively through your own signed-in Chrome browser via the MV3 extension.
 
 ## Quick Start (Local Development)
 
@@ -14,9 +21,9 @@ npm run dev
 Open `http://localhost:3000`. The initial sample scan runs automatically on startup in Practice Mode (`DRY_RUN=true`).
 
 1. Open **My résumé** and upload a `.docx`, `.pdf`, or `.txt` résumé.
-2. Review generated drafts in **Outreach queue**, edit the subject/body, and click **Approve and queue** or **Skip**.
-3. Use **Paste hiring post** to import any LinkedIn or web hiring post directly without an extension.
-4. Run unit tests and typechecks:
+2. Enter your role, location, workplace, and employment filters in the **LinkedIn search filters** bar at the top of **Outreach queue** and click **Fetch posts** (with the Chrome extension connected), or use **Paste hiring post** to import any hiring post manually.
+3. Review generated email drafts in **Ready for review**, or open **Link / DM** for Assisted LinkedIn Apply and external application links.
+4. Run unit tests, typecheck, lint, and production build:
 
 ```bash
 npm test
@@ -29,9 +36,11 @@ npm run build
 
 The unpacked Chrome MV3 extension in `browser/` works with **both** your local dashboard (`http://localhost:3000/`) and hosted Cloud Run dashboards (`https://*.run.app/`) without exporting LinkedIn session cookies:
 
-1. Open `chrome://extensions` in the desktop Chrome profile where you are signed in to LinkedIn.
-2. Enable **Developer mode**, choose **Load unpacked** (or click **Reload** if already installed), and select the `browser/` directory.
-3. Open your HireMate dashboard directly in a top-level Chrome tab and click **Find posts in my browser** (or **Check saved leads again** on unverified previews).
+1. In HireMate, open **Chrome extension** and click **Download extension ZIP** (or use the local `browser/` folder directly) and unzip it.
+2. Open `chrome://extensions` in the desktop Chrome profile where you are signed in to LinkedIn.
+3. Enable **Developer mode**, choose **Load unpacked** (or click **Reload** after extension changes), and select the unzipped folder.
+4. Open your HireMate dashboard in a top-level Chrome tab, enter your filters in **LinkedIn search filters**, and click **Fetch posts** (or **Check saved leads again** on unverified previews).
+
 
 ## Environment Variables
 
