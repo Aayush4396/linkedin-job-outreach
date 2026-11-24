@@ -1,59 +1,119 @@
 # HireMate
 
-HireMate discovers hiring posts for the roles in your saved search from a configured HTTPS JSON feed, extracts explicit email addresses, and prepares résumé-based email drafts. The phone dashboard lets you upload your résumé, inspect the extracted text, edit a draft, and approve or skip it. Drafts retain their original attachment even if you later replace your résumé.
+HireMate discovers hiring posts from LinkedIn (via the Chrome extension), an authorized HTTPS JSON feed, or direct manual paste; evaluates role fit against your uploaded résumé using server-side Gemini AI; and drafts editable, reviewable application outreach.
 
-## Try it locally
+## Quick Start (Local Development)
 
-Use Python 3.11 or newer. Run these commands from the repository root:
+Requires **Node.js 22+** and `npm`:
 
-    python -m venv .venv
-    .venv\Scripts\activate
-    python -m pip install -r requirements.txt
-    python -m uvicorn app.main:app
+```bash
+npm install
+npm run dev
+```
 
-Open http://127.0.0.1:8000. The initial sample scan runs at startup. Upload a résumé, review the sample application, approve it, and reload after 30 seconds to see “Simulated”. With no Vertex model configured, the preview uses a generic template. Sample posts and practice-mode drafts always simulate delivery. Local settings are process environment variables. See .env.example. Store the SQLite database and data/resumes together. The local scheduler runs only while the process is open.
+Open `http://localhost:3000`. The initial sample scan runs automatically on startup in Practice Mode (`DRY_RUN=true`).
 
-TXT, DOCX, and text-based PDF parsing use Python libraries. Legacy DOC conversion uses LibreOffice. Image-only PDF pages use Poppler and English Tesseract OCR. The supplied Docker image installs all three system tools. For the same environment locally:
+1. Open **My résumé** and upload a `.docx`, `.pdf`, or `.txt` résumé.
+2. Review generated drafts in **Outreach queue**, edit the subject/body, and click **Approve and queue** or **Skip**.
+3. Use **Paste hiring post** to import any LinkedIn or web hiring post directly without an extension.
+4. Run unit tests and typechecks:
 
-    docker build -t hiremate .
-    docker run --rm -p 127.0.0.1:8000:8080 -v hiremate-preview:/srv/data -e DATABASE_PATH=/srv/data/hiremate.sqlite3 hiremate
+```bash
+npm test
+npm run typecheck
+npm run lint
+npm run build
+```
 
-## Connect real hiring posts and drafting
+## Chrome Extension Mode (`browser/`)
 
-Set POST_FEED_URL to a feed you are authorized to access. The endpoint must return a JSON array of objects with url (HTTPS permalink), published (YYYY-MM-DD), title, and text (full hiring post). app/sample.json shows the contract. The service polls this URL automatically. You must supply a provider that supports LinkedIn hiring posts or adapt app/sources.py to its documented API. LinkedIn account credentials alone do not provide this feed.
+The unpacked Chrome MV3 extension in `browser/` works with **both** your local dashboard (`http://localhost:3000/`) and hosted Cloud Run dashboards (`https://*.run.app/`) without exporting LinkedIn session cookies:
 
-If you have authorization from LinkedIn to automate a search, the optional Playwright connector reads visible hiring posts from the search results. Set LINKEDIN_LI_AT_COOKIE and LINKEDIN_QUERY with POST_FEED_URL empty (for Cloud Shell use POST_SOURCE=linkedin). The script stores the cookie in Secret Manager. A checkpoint or changed page layout can stop collection. The date shown for browser search results is the observation date. Refresh an expired connection from the cloud dashboard. The worker reads the latest Secret Manager version at scan time. For this connector outside Docker, install the matching browser with python -m playwright install chromium.
+1. Open `chrome://extensions` in the desktop Chrome profile where you are signed in to LinkedIn.
+2. Enable **Developer mode**, choose **Load unpacked** (or click **Reload** if already installed), and select the `browser/` directory.
+3. Open your HireMate dashboard directly in a top-level Chrome tab and click **Find posts in my browser** (or **Check saved leads again** on unverified previews).
 
-Set GCP_PROJECT, GCP_REGION, and GEMINI_MODEL for Vertex AI drafting. Choose a model available in your project and location. Locally, configure application default credentials. The cloud deployment uses its runtime service account. RESUME_BUCKET selects Cloud Storage and Firestore in place of local storage.
+## Environment Variables
 
-## Cloud Run
+See `.env.example` for all supported variables. Keep secrets strictly in environment variables or Google Cloud Secret Manager—never hardcode API keys or credentials.
 
-Run deploy.sh in Google Cloud Shell from a billing-enabled project. The deploying identity needs permission to enable services, build from source, create the listed resources and IAM bindings, deploy public and private services, and act as the runtime and scheduler accounts. Configure Cloud Build source-deployment permissions for the project's build account. Choose a Firestore-compatible region before the first deploy.
+| Variable | Default | Purpose |
+|---|---|---|
+| `GEMINI_API_KEY` | Blank | Server-side Gemini API key (configured via Secret Manager in Cloud Run). |
+| `GEMINI_MODEL` | `gemini-4-hydrogen` | Preferred Gemini model (automatically falls back to `gemini-3.1-flash-lite` / `gemini-flash-latest` on transient errors). |
+| `POST_FEED_URL` | Blank | Public HTTPS JSON feed polled by **Check for posts**. |
+| `FEED_AUTH_HEADER` | Blank | Optional `Authorization` header for protected HTTPS feeds (store in Secret Manager). |
+| `DASHBOARD_PIN` | Blank | Optional Basic/Bearer authentication PIN for remote deployments (store in Secret Manager). |
+| `DRY_RUN` | `true` | Keeps outreach in practice/simulation mode when `true`. |
+| `APPROVAL_MODE` | `true` | Requires manual review of new drafts before queuing. |
+| `MAX_EMAILS_PER_DAY` | `20` | Daily delivery cap (`0`–`20`). |
+| `OUTREACH_TIMEZONE` | `Asia/Kolkata` | Local timezone used for daily cap tracking. |
 
-    export GCP_PROJECT=your-project-id
-    export GCP_REGION=us-central1
-    export GEMINI_MODEL=your-enabled-model-id
-    bash deploy.sh
+## Deploying to Google Cloud Run
 
-On first use the script prompts for the feed URL and dashboard password. Use a strong random DASHBOARD_PIN. Sign in over HTTPS with username hiremate. Cloud Scheduler invokes a separate IAM-private worker for scans at 09:00, 13:00 and 17:00 on weekdays and for one worker check per minute. Each scheduled scan starts after a randomized 5–35 minute delay. Upload your résumé from the dashboard. Keep initial deployments in practice mode. Use Secret Manager to rotate credentials and redeploy.
+### 1. Prerequisites & Enable APIs
 
-To enable real mail after testing, redeploy with DRY_RUN=false and supply GMAIL_ADDRESS and GMAIL_APP_PASSWORD for an eligible Gmail account. Newly created live drafts require approval by default. APPROVAL_MODE=false queues new drafts automatically. The sender reserves capacity transactionally, capped at 20 per configured local day, with a randomized 2–6 minute minimum interval between claims. Scheduler cadence may increase that interval. Simulations consume a slot too. “Check delivery” means a live send was claimed but delivery was not confirmed. Check Gmail Sent before taking further action. The worker never automatically retries an uncertain send.
+Install the [Google Cloud SDK (`gcloud`)](https://cloud.google.com/sdk/docs/install) and enable required APIs:
 
-## Verification
+```bash
+export GCP_PROJECT="YOUR_PROJECT_ID"
+export GCP_REGION="us-central1"
 
-    python -m compileall app
-    python -m unittest discover -s tests
+gcloud config set project "$GCP_PROJECT"
+gcloud services enable \
+  run.googleapis.com \
+  cloudbuild.googleapis.com \
+  secretmanager.googleapis.com \
+  firestore.googleapis.com
+```
 
-The tests use temporary local data and mock external delivery. Production validation requires an authorized live feed, an enabled Vertex model, a Google Cloud project and an eligible sender mailbox.
+### 2. Secret Manager Setup
 
-## LinkedIn discovery pilot
+Store `GEMINI_API_KEY` (and optional `DASHBOARD_PIN` / `FEED_AUTH_HEADER`) in Google Cloud Secret Manager and grant your Cloud Run runtime service account access:
 
-Run `python -m app.discovery_pilot` with an authorized source configured. This command fetches the source twice into a temporary database and never calls Gemini or Gmail. It passes only when a relevant LinkedIn post published within 14 days has explicit application instructions and the second independent fetch returns its ID again without inserting another record. New unrelated posts on the second scan are allowed.
+```bash
+# Create and populate the secret
+gcloud secrets create GEMINI_API_KEY --replication-policy="automatic"
+echo -n "YOUR_API_KEY" | gcloud secrets versions add GEMINI_API_KEY --data-file=-
 
-Feed records should carry the original publication date and full post text. Mark excerpts with `content_kind: snippet` and observation dates with `date_kind: observed`. The browser connector marks a scan date as observed when no machine-readable date is available. Such records stay unverified. Posts directing applicants to a form appear as “Apply via link”.
+# Grant the default Cloud Run service account access to read the secret
+gcloud secrets add-iam-policy-binding GEMINI_API_KEY \
+  --member="serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+```
 
-## Saved search and signed-in browser dry run
+### 3. Firestore Security Rules (When Enabling Cloud Persistence)
 
-Open **My saved search** and enter comma-separated role terms and locations. Terms within each field are alternatives. Selected work arrangement and employment type must also appear in the post. Empty fields leave that part of the search open. HireMate compares the responsibilities and requirements against the uploaded résumé before preparing outreach. In practice mode without a model, the comparison uses shared keywords. **Check for posts** saves the settings and scans the configured server source. Settings apply to incoming results; existing review cards remain in your history.
+If you provision Firestore for multi-user cloud persistence, enforce strict owner-bound isolation in `firestore.rules` (never use `allow read, write: if true;`):
 
-For an interactive local pilot, open the dashboard in the **same Chrome profile** you use for LinkedIn. In Chrome’s extensions page, enable Developer mode, choose **Load unpacked**, and select this repository’s **browser** folder. Reload the dashboard. With practice mode on, upload a résumé and select **Find posts in my browser**. The extension opens a Posts search, reads identifiable result cards and sends them to the local dashboard. Click back to HireMate to review. Posts with missing dates or visibly truncated text remain unverified. LinkedIn layouts can vary; a page the extension cannot read reports an error. The extension needs no exported cookie. It runs on user request on the computer hosting HireMate; the phone dashboard and Cloud Run worker cannot control that desktop tab.
+```javascript
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId}/interactions/{interactionId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+  }
+}
+```
+
+Deploy rules with `firebase deploy --only firestore:rules`.
+
+### 4. Deploy to Cloud Run
+
+```bash
+gcloud run deploy hiremate \
+  --source . \
+  --region "$GCP_REGION" \
+  --set-secrets="GEMINI_API_KEY=GEMINI_API_KEY:latest" \
+  --set-env-vars="DRY_RUN=true,APPROVAL_MODE=true,OUTREACH_TIMEZONE=Asia/Kolkata" \
+  --allow-unauthenticated
+```
+
+### 5. Apply Campaign Verification Label
+
+```bash
+gcloud run services update hiremate \
+  --update-labels=dev-tutorial=cloud-run-ai-challenge \
+  --region="$GCP_REGION"
+```

@@ -1,0 +1,8 @@
+{
+  "name": "HireMate",
+  "description": "Discover hiring posts from LinkedIn, feeds, or manual paste, match them against your résumé with Gemini, and draft reviewable application outreach.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

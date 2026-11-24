@@ -2,13 +2,13 @@
   "manifest_version": 3,
   "name": "HireMate local post search",
   "description": "Run a search from your local HireMate dashboard and review visible LinkedIn posts.",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "permissions": ["scripting"],
   "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'none';"},
   "host_permissions": ["https://www.linkedin.com/*"],
   "background": {"service_worker": "worker.js"},
   "content_scripts": [{
-    "matches": ["http://127.0.0.1/*", "http://localhost/*"],
+    "matches": ["http://127.0.0.1/*", "http://localhost/*", "https://*.run.app/*"],
     "js": ["dashboard.js"]
   }]
 }

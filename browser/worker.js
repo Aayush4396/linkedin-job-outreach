@@ -107,12 +107,19 @@ function matchesSavedPreview(saved, candidate) {
   });
 }
 
+function isAllowedDashboardUrl(dashboard) {
+  if (dashboard.pathname !== "/") return false;
+  if (dashboard.protocol === "http:" && ["localhost", "127.0.0.1"].includes(dashboard.hostname)) {
+    return true;
+  }
+  return dashboard.protocol === "https:" && dashboard.hostname.endsWith(".run.app");
+}
+
 async function recheck(saved, sender, report, signal) {
   const dashboard = new URL(sender.url);
   const url = new URL(saved.url);
-  if (dashboard.protocol !== "http:" || !["localhost","127.0.0.1"].includes(dashboard.hostname) ||
-      dashboard.pathname !== "/" || url.origin !== "https://www.linkedin.com")
-    throw Error("Open your local HireMate dashboard first.");
+  if (!isAllowedDashboardUrl(dashboard) || url.origin !== "https://www.linkedin.com")
+    throw Error("Open your HireMate dashboard tab first.");
   let post = {...saved};
   if (url.pathname === "/search/results/content/") {
     const query = new URL("/search/results/content/", url.origin);
@@ -184,9 +191,8 @@ const hasPostDate = post => post.date_kind === "published" || post.date_kind ===
 async function search(message, sender, report, signal) {
   const dashboard = new URL(sender.url);
   const url = new URL(message.url);
-  if (dashboard.protocol !== "http:" || !["localhost","127.0.0.1"].includes(dashboard.hostname) ||
-      dashboard.pathname !== "/" || url.origin !== "https://www.linkedin.com" ||
-      url.pathname !== "/search/results/content/") throw Error("Open your local HireMate dashboard first.");
+  if (!isAllowedDashboardUrl(dashboard) || url.origin !== "https://www.linkedin.com" ||
+      url.pathname !== "/search/results/content/") throw Error("Open your HireMate dashboard tab first.");
   report("Opening LinkedIn. Return to HireMate to follow the search.");
   const tab = await openLinkedInTab({url: url.href, active:!message.targeted},signal);
   const closeTab = message.targeted && temporaryTabCleanup(tab.id, signal);
