@@ -177,5 +177,56 @@ export async function downloadEmailEml(
   return { filename };
 }
 
+export function uploadPostScreenshot(
+  file: File,
+  optionalUrl?: string,
+): Promise<{
+  ok: boolean;
+  id: string;
+  title: string;
+  status: string;
+  recipient: string;
+  author_name: string;
+  text: string;
+}> {
+  const headers: Record<string, string> = {
+    ...BASE_HEADERS,
+    "Content-Type": file.type || "application/octet-stream",
+  };
+  if (optionalUrl && optionalUrl.trim()) {
+    headers["X-Post-Url"] = encodeURIComponent(optionalUrl.trim());
+  }
+  return requestJson("/api/posts/from-screenshot", {
+    method: "POST",
+    headers,
+    body: file,
+  });
+}
+
+export function importPostFromUrl(payload: {
+  url?: string;
+  title?: string;
+  text?: string;
+}): Promise<{
+  ok: boolean;
+  imported: boolean;
+  blocked: boolean;
+  id?: string;
+  url: string;
+  published: string;
+  title?: string;
+  status?: string;
+  recipient?: string;
+  truncated?: boolean;
+  reason?: string;
+}> {
+  return requestJson("/api/posts/from-url", {
+    method: "POST",
+    headers: { ...BASE_HEADERS, "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+
 
 

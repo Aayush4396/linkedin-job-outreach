@@ -23,6 +23,12 @@ import {
   mimeTypeForFilename,
   sanitizeAttachmentFilename,
 } from "./server/emlBuilder";
+import { detectImageMimeType, extractHiringPostFromScreenshot } from "./server/gemini";
+import {
+  extractLinkedInUrlFromShare,
+  fetchPublicLinkedInPost,
+  isSafeLinkedInPublicUrl,
+} from "./server/linkedinFetcher";
 import { parseAndSaveResume } from "./server/resumeParser";
 import { HireMateStore } from "./server/storage";
 import {
@@ -35,6 +41,7 @@ import {
   draftEmailForPost,
   fitIsCurrent,
   getSavedSearch,
+  hashKey,
   localIsoDate,
   normalizeExistingEmailDrafts,
   prepareMatches,
@@ -114,6 +121,12 @@ const manualPostSchema = z.object({
   text: z.string().trim().min(15, "Paste the full hiring post text.").max(30000),
 });
 
+const shareUrlSchema = z.object({
+  url: z.string().trim().max(2048).optional().default(""),
+  title: z.string().trim().max(500).optional().default(""),
+  text: z.string().trim().max(8000).optional().default(""),
+});
+
 const deliveryActionSchema = z.object({
   action: z.enum(["mark_sent", "requeue"]),
 });
@@ -142,7 +155,7 @@ async function createApp() {
 
   // Top-level payload parsing middleware MUST mount before route definitions.
   app.use((req, res, next) => {
-    if (req.path === "/api/resume") {
+    if (req.path === "/api/resume" || req.path === "/api/posts/from-screenshot") {
       return next();
     }
     return express.json({ limit: "2mb" })(req, res, next);
@@ -335,6 +348,184 @@ async function createApp() {
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Could not save or assess this post.";
+      res.status(502).json({ detail: message });
+    }
+  });
+
+  app.post(
+    "/api/posts/from-screenshot",
+    express.raw({ type: "*/*", limit: "8mb" }),
+    async (req: Request, res: Response) => {
+      const rawBuffer = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      if (rawBuffer.byteLength === 0) {
+        res.status(400).json({ detail: "Choose or paste a screenshot image first." });
+        return;
+      }
+      if (rawBuffer.byteLength > 8_000_000) {
+        res.status(413).json({ detail: "Choose a screenshot smaller than 8 MB." });
+        return;
+      }
+
+      const detectedMime = detectImageMimeType(rawBuffer);
+      if (!detectedMime) {
+        res.status(422).json({
+          detail: "Unsupported image format. Upload a PNG, JPEG, or WebP screenshot.",
+        });
+        return;
+      }
+
+      const rawPostUrlHeader = String(req.headers["x-post-url"] ?? "").trim();
+      let decodedPostUrl = "";
+      if (rawPostUrlHeader) {
+        try {
+          decodedPostUrl = decodeURIComponent(rawPostUrlHeader).trim();
+        } catch {
+          decodedPostUrl = rawPostUrlHeader;
+        }
+      }
+      const optionalLinkedInUrl =
+        decodedPostUrl && isSafeLinkedInPublicUrl(decodedPostUrl) ? decodedPostUrl : "";
+
+      const todayIso = localIsoDate(config.timezone);
+      try {
+        const extracted = await extractHiringPostFromScreenshot(config, {
+          mimeType: detectedMime,
+          bytes: rawBuffer,
+          todayIso,
+        });
+
+        const imgHash = hashKey(rawBuffer.toString("base64")).slice(0, 24);
+        const postUrl =
+          optionalLinkedInUrl || `https://screenshot.hiremate.local/capture/${imgHash}`;
+        const exactTs = optionalLinkedInUrl ? linkedinTimestampFromUrl(optionalLinkedInUrl) : null;
+        const published = exactTs ? exactTs.slice(0, 10) : extracted.published || todayIso;
+
+        const postInput = {
+          url: postUrl,
+          title: extracted.title,
+          published,
+          text: extracted.text,
+          ...(extracted.author_name ? { author_name: extracted.author_name } : {}),
+          date_kind: "published" as const,
+          content_kind: "full" as const,
+        };
+
+        capturePost(store, postInput, false, undefined, todayIso);
+        const postId = linkedinId(postUrl);
+        const recordId =
+          (postId ? store.read<{ post: string }>("linkedin_ids", postId)?.post : null) ??
+          hashKey(postUrl);
+
+        const captured = store.read<PostRecord>("posts", recordId);
+        const resume = store.read<ResumeRecord>("settings", "resume");
+        if (
+          captured &&
+          resume &&
+          (captured.status === "Needs draft" ||
+            captured.status === "Contact on LinkedIn" ||
+            captured.status === "Apply via link")
+        ) {
+          await assessPost(store, config, captured, resume);
+        }
+
+        const finalRecord = store.read<PostRecord>("posts", recordId);
+        res.status(201).json({
+          ok: true,
+          id: recordId,
+          title: finalRecord?.title ?? extracted.title,
+          status: finalRecord?.status ?? "Needs draft",
+          recipient: finalRecord?.recipient ?? "",
+          author_name: extracted.author_name,
+          text: finalRecord?.text ?? extracted.text,
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Could not read this screenshot or draft outreach.";
+        const isQuota = /\b429\b|RESOURCE_EXHAUSTED/i.test(message);
+        const isInput = /not extract enough|unsupported image|requires GEMINI_API_KEY/i.test(message);
+        res.status(isInput ? 422 : isQuota ? 429 : 502).json({ detail: message });
+      }
+    },
+  );
+
+  app.post("/api/posts/from-url", async (req, res) => {
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const parsed = shareUrlSchema.safeParse(body);
+    if (!parsed.success) {
+      res.status(400).json({ detail: parsed.error.issues[0]?.message ?? "Invalid share payload." });
+      return;
+    }
+
+    const linkedInUrl = extractLinkedInUrlFromShare(parsed.data);
+    if (!linkedInUrl) {
+      res.status(422).json({
+        detail: "No valid public https://www.linkedin.com post link was found.",
+      });
+      return;
+    }
+
+    const todayIso = localIsoDate(config.timezone);
+    try {
+      const fetched = await fetchPublicLinkedInPost(linkedInUrl, todayIso);
+      if (fetched.blocked || !fetched.text) {
+        res.json({
+          ok: true,
+          imported: false,
+          blocked: true,
+          url: fetched.url,
+          published: fetched.published,
+          reason:
+            fetched.reason ??
+            "LinkedIn hid this post behind sign-in. Upload a screenshot below to extract and draft.",
+        });
+        return;
+      }
+
+      const postInput = {
+        url: fetched.url,
+        title: fetched.title,
+        published: fetched.published,
+        text: fetched.text,
+        ...(fetched.author_name ? { author_name: fetched.author_name } : {}),
+        date_kind: "published" as const,
+        content_kind: "full" as const,
+      };
+      capturePost(store, postInput, false, undefined, todayIso);
+
+      const postId = linkedinId(fetched.url);
+      const recordId =
+        (postId ? store.read<{ post: string }>("linkedin_ids", postId)?.post : null) ??
+        hashKey(fetched.url);
+      const captured = store.read<PostRecord>("posts", recordId);
+      const resume = store.read<ResumeRecord>("settings", "resume");
+      if (
+        captured &&
+        resume &&
+        (captured.status === "Needs draft" ||
+          captured.status === "Contact on LinkedIn" ||
+          captured.status === "Apply via link")
+      ) {
+        await assessPost(store, config, captured, resume);
+      }
+
+      const finalRecord = store.read<PostRecord>("posts", recordId);
+      res.status(201).json({
+        ok: true,
+        imported: true,
+        blocked: false,
+        id: recordId,
+        url: fetched.url,
+        published: fetched.published,
+        title: finalRecord?.title ?? fetched.title,
+        status: finalRecord?.status ?? "Needs draft",
+        recipient: finalRecord?.recipient ?? "",
+        truncated: fetched.truncated,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Could not read this LinkedIn post URL.";
       res.status(502).json({ detail: message });
     }
   });
@@ -827,12 +1018,17 @@ async function createApp() {
     dispatchInterval.unref();
   }
 
+  // Fallback handler if Android Web Share Target reaches the server before SW activation.
+  app.post("/share-target", (_req, res) => {
+    res.redirect(303, "/?shared=1");
+  });
+
   // Serve Vite dev middleware in development or static dist/ in production.
   const isProd = process.env.NODE_ENV === "production";
   if (!isProd) {
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
-      server: { middlewareMode: true, hmr: false },
+      server: { middlewareMode: true, hmr: false, ws: false },
       appType: "spa",
     });
     app.use(vite.middlewares);

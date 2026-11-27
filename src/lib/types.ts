@@ -45,6 +45,7 @@ export interface PostRecord {
   text: string;
   published: string;
   published_at?: string;
+  author_name?: string;
   date_kind?: DateKind;
   content_kind?: ContentKind;
   status: PostStatus;
@@ -104,6 +105,7 @@ export interface RawPostInput {
   title: string;
   text: string;
   published: string;
+  author_name?: string;
   date_kind?: DateKind;
   content_kind?: ContentKind;
   verification_note?: string;

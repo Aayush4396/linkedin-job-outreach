@@ -163,7 +163,12 @@ export function PostCard({
   const missing = post.status === "Unverified lead" ? missingDetails(post) : "";
   const isLongPost = post.text.length > 420;
   const visibleText = isLongPost && !expanded ? `${post.text.slice(0, 420).trimEnd()}…` : post.text;
-  const safePostUrl = !post.sample && isSafeHttpUrl(post.url) ? post.url : null;
+  const safePostUrl =
+    !post.sample &&
+    !post.url.startsWith("https://screenshot.hiremate.local/") &&
+    isSafeHttpUrl(post.url)
+      ? post.url
+      : null;
   const safeApplyUrl = post.apply_link && isSafeHttpUrl(post.apply_link) ? post.apply_link : null;
   const asksForLinkedIn =
     post.status === "Ready for review" && /\blinkedin\s+(?:profile|url)\b/i.test(post.text);

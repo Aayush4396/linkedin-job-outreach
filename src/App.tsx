@@ -12,6 +12,7 @@ import {
   downloadEmailEml,
   fetchDashboard,
   generateEmailDraft,
+  importPostFromUrl,
   runServerScan,
   saveApprovalPreference,
   saveSearchPreferences,
@@ -19,9 +20,11 @@ import {
   updateDelivery,
   updateDraft,
   updateOutreach,
+  uploadPostScreenshot,
   uploadResumeFile,
 } from "./lib/api";
 import { missingDetails, PRIORITY_STATUSES, statusRank } from "./lib/postDiscovery";
+import { consumePendingShare } from "./lib/shareInbox";
 import type {
   DashboardPayload,
   EmploymentChoice,
@@ -30,8 +33,10 @@ import type {
   WorkplaceChoice,
 } from "./lib/types";
 import { ExtensionPanel } from "./components/ExtensionPanel";
-import { ManualPostPanel } from "./components/ManualPostPanel";
+import { ManualPostPanel, type IncomingImportPrefill } from "./components/ManualPostPanel";
+import { OfflineIndicator } from "./components/OfflineIndicator";
 import { PostCard, type OutreachActionPayload } from "./components/PostCard";
+import { PWAInstallButton } from "./components/PWAInstallButton";
 import { ResumePanel } from "./components/ResumePanel";
 import { Sidebar, type WorkspaceSection } from "./components/Sidebar";
 import { SearchPanel } from "./components/SearchPanel";
@@ -46,7 +51,7 @@ interface FailedAction {
 const SECTION_LABELS: Record<WorkspaceSection, string> = {
   queue: "Outreach queue",
   search: "Saved search",
-  paste: "Paste hiring post",
+  paste: "Add hiring post",
   resume: "My résumé",
   extension: "Chrome extension",
 };
@@ -55,6 +60,7 @@ export default function App() {
   const [data, setData] = useState<DashboardPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeSection, setActiveSection] = useState<WorkspaceSection>("queue");
+  const [importPrefill, setImportPrefill] = useState<IncomingImportPrefill | null>(null);
   const [queueFilter, setQueueFilter] = useState<QueueFilter>("priority");
   const [searchQuery, setSearchQuery] = useState("");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -535,6 +541,121 @@ export default function App() {
     [loadDashboard],
   );
 
+  const handleImportScreenshot = useCallback(
+    async (file: File, optionalUrl?: string) => {
+      setFailedAction(null);
+      setNotice("Reading screenshot with Gemini and drafting outreach…");
+      try {
+        const result = await uploadPostScreenshot(file, optionalUrl);
+        await loadDashboard();
+        setImportPrefill(null);
+        setNotice(
+          result.status === "Ready for review"
+            ? `Email draft ready for ${result.recipient || result.title} (from screenshot).`
+            : `Imported "${result.title}" from screenshot (${result.status}).`,
+        );
+        setActiveSection("queue");
+        setQueueFilter(result.status === "Ready for review" ? "review" : "priority");
+        return true;
+      } catch (error) {
+        const msg =
+          error instanceof Error ? error.message : "Could not extract a post from this screenshot.";
+        setNotice("");
+        setFailedAction({
+          message: msg,
+          retry: async () => {
+            await handleImportScreenshot(file, optionalUrl);
+          },
+        });
+        return false;
+      }
+    },
+    [loadDashboard],
+  );
+
+  const handleImportUrl = useCallback(
+    async (payload: { url?: string; title?: string; text?: string }) => {
+      setFailedAction(null);
+      setNotice("Reading LinkedIn post link…");
+      try {
+        const result = await importPostFromUrl(payload);
+        if (result.imported) {
+          await loadDashboard();
+          setImportPrefill(null);
+          setNotice(
+            result.status === "Ready for review"
+              ? `Email draft ready for ${result.recipient || result.title}.`
+              : `Imported "${result.title ?? "LinkedIn post"}" (${result.status ?? "saved"}).` +
+                  (result.truncated ? " LinkedIn truncated the preview—add a screenshot if an email was cut off." : ""),
+          );
+          setActiveSection("queue");
+          setQueueFilter(result.status === "Ready for review" ? "review" : "priority");
+          return { imported: true };
+        }
+        setNotice(
+          result.reason ??
+            "LinkedIn hid this post behind sign-in. Upload a screenshot to draft immediately.",
+        );
+        return {
+          imported: false,
+          blocked: true,
+          url: result.url,
+          published: result.published,
+          reason: result.reason,
+        };
+      } catch (error) {
+        const msg =
+          error instanceof Error ? error.message : "Could not import this LinkedIn post link.";
+        setNotice("");
+        setFailedAction({
+          message: msg,
+          retry: async () => {
+            await handleImportUrl(payload);
+          },
+        });
+        return { imported: false };
+      }
+    },
+    [loadDashboard],
+  );
+
+  // Consume Android Web Share Target payloads (shared screenshot or shared LinkedIn link).
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const shared = await consumePendingShare();
+      if (!shared || cancelled) return;
+
+      if (shared.screenshot) {
+        setActiveSection("paste");
+        await handleImportScreenshot(shared.screenshot, shared.url || undefined);
+        return;
+      }
+
+      if (shared.url || shared.text) {
+        setActiveSection("paste");
+        const result = await handleImportUrl({
+          url: shared.url,
+          title: shared.title,
+          text: shared.text,
+        });
+        if (!cancelled && !result.imported && result.blocked) {
+          setImportPrefill({
+            mode: "screenshot",
+            url: result.url || shared.url,
+            published: result.published,
+            helperNote:
+              result.reason ||
+              "LinkedIn requires sign-in for this post. Upload a screenshot below to extract and draft.",
+          });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [handleImportScreenshot, handleImportUrl]);
+
   const posts = useMemo(() => data?.posts ?? [], [data?.posts]);
 
   const counts = useMemo(() => {
@@ -628,13 +749,13 @@ export default function App() {
 
       <div className="flex-1 min-w-0 flex flex-col">
         {/* Clean Top Bar Contract: Breadcrumb on left, 1 primary action on right */}
-        <header className="sticky top-0 z-20 h-16 bg-white border-b border-slate-200 px-4 sm:px-6 lg:px-8 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3 min-w-0">
+        <header className="sticky top-0 z-20 h-16 bg-white border-b border-slate-200 px-3 sm:px-6 lg:px-8 flex items-center justify-between gap-2 sm:gap-4">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             <button
               type="button"
               onClick={() => setMobileNavOpen(true)}
               aria-label="Open navigation"
-              className="lg:hidden p-2 -ml-2 rounded-lg text-slate-600 hover:text-slate-900 hover:bg-slate-100"
+              className="lg:hidden p-2 -ml-1.5 rounded-lg text-slate-600 hover:text-slate-900 hover:bg-slate-100 shrink-0"
             >
               <Menu className="w-5 h-5" />
             </button>
@@ -643,37 +764,42 @@ export default function App() {
               <span className="text-slate-300 hidden sm:inline" aria-hidden="true">
                 /
               </span>
-              <h1 className="font-display text-base font-semibold text-slate-900 truncate">
+              <h1 className="font-display text-sm sm:text-base font-semibold text-slate-900 truncate">
                 {SECTION_LABELS[activeSection]}
               </h1>
             </div>
           </div>
 
-          <button
-            id="scan"
-            type="button"
-            disabled={scanning || browserBusy}
-            onClick={() => {
-              if (extensionReady) {
-                void handleFetchWithFilters(quickSearch);
-              } else {
-                void handleServerScan();
-              }
-            }}
-            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-lg bg-[#423499] text-white hover:bg-[#34287E] disabled:opacity-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-          >
-            <RefreshCw
-              className={`w-3.5 h-3.5 ${scanning || browserBusy ? "animate-spin" : ""}`}
-              aria-hidden="true"
-            />
-            <span>
-              {scanning || browserBusy
-                ? "Fetching…"
-                : extensionReady
-                  ? "Fetch LinkedIn posts"
-                  : "Check for posts"}
-            </span>
-          </button>
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            <div className="lg:hidden">
+              <PWAInstallButton variant="compact" />
+            </div>
+            <button
+              id="scan"
+              type="button"
+              disabled={scanning || browserBusy}
+              onClick={() => {
+                if (extensionReady) {
+                  void handleFetchWithFilters(quickSearch);
+                } else {
+                  void handleServerScan();
+                }
+              }}
+              className="inline-flex items-center gap-1.5 px-2.5 sm:px-4 py-1.5 sm:py-2 text-xs font-medium rounded-lg bg-[#423499] text-white hover:bg-[#34287E] disabled:opacity-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <RefreshCw
+                className={`w-3.5 h-3.5 ${scanning || browserBusy ? "animate-spin" : ""}`}
+                aria-hidden="true"
+              />
+              <span>
+                {scanning || browserBusy
+                  ? "Fetching…"
+                  : extensionReady
+                    ? "Fetch posts"
+                    : "Check posts"}
+              </span>
+            </button>
+          </div>
         </header>
 
         <main className="flex-1 px-4 sm:px-6 lg:px-8 py-6 max-w-6xl w-full mx-auto space-y-6">
@@ -746,13 +872,25 @@ export default function App() {
                         : "Chrome extension not detected"}
                     </span>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setActiveSection("extension")}
-                    className="text-xs font-medium text-[#423499] hover:underline cursor-pointer whitespace-nowrap"
-                  >
-                    {extensionReady ? "Extension settings" : "Install Chrome extension"}
-                  </button>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setActiveSection("paste")}
+                      className="text-xs font-medium text-[#423499] hover:underline cursor-pointer whitespace-nowrap"
+                    >
+                      Import screenshot / link
+                    </button>
+                    <span className="text-slate-300" aria-hidden="true">
+                      ·
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setActiveSection("extension")}
+                      className="text-xs font-medium text-slate-600 hover:text-slate-900 hover:underline cursor-pointer whitespace-nowrap"
+                    >
+                      {extensionReady ? "Extension settings" : "Chrome extension"}
+                    </button>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1.1fr)_144px_126px_auto] gap-2.5">
@@ -996,7 +1134,7 @@ export default function App() {
                       onClick={() => setActiveSection("paste")}
                       className="px-3.5 py-2 text-xs font-medium rounded-lg bg-[#423499] text-white hover:bg-[#34287E] cursor-pointer"
                     >
-                      Paste a hiring post
+                      Add a hiring post
                     </button>
                   </div>
                 </div>
@@ -1030,7 +1168,14 @@ export default function App() {
             />
           )}
 
-          {activeSection === "paste" && <ManualPostPanel onSubmitPost={handleManualPost} />}
+          {activeSection === "paste" && (
+            <ManualPostPanel
+              prefill={importPrefill}
+              onSubmitPost={handleManualPost}
+              onSubmitScreenshot={handleImportScreenshot}
+              onSubmitUrl={handleImportUrl}
+            />
+          )}
 
           {activeSection === "resume" && (
             <ResumePanel resume={data?.resume ?? null} onUploadResume={handleUploadResume} />
@@ -1048,6 +1193,7 @@ export default function App() {
           )}
         </main>
       </div>
+      <OfflineIndicator />
     </div>
   );
 }

@@ -7,6 +7,7 @@ import {
   X,
 } from "lucide-react";
 import type { DashboardPayload } from "../lib/types";
+import { PWAInstallButton } from "./PWAInstallButton";
 
 export type WorkspaceSection = "queue" | "search" | "paste" | "resume" | "extension";
 
@@ -54,7 +55,7 @@ export function Sidebar({
     },
     {
       id: "paste",
-      label: "Paste hiring post",
+      label: "Add hiring post",
       icon: PlusSquare,
     },
     {
@@ -176,6 +177,10 @@ export function Sidebar({
           />
           <span className="leading-snug">Review new drafts before queuing</span>
         </label>
+
+        <div className="pt-2 border-t border-slate-100">
+          <PWAInstallButton variant="sidebar" />
+        </div>
       </div>
     </div>
   );

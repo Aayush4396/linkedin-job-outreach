@@ -745,7 +745,7 @@ function cleanNameToken(raw: string): string | null {
 }
 
 export function extractRecipientName(
-  post: Pick<PostRecord, "url" | "recipient">,
+  post: Pick<PostRecord, "url" | "recipient" | "author_name">,
 ): string | null {
   // 1. Personal email address (e.g. lavanya.s@..., smita.rai@..., hatim.kagdi@...)
   const recipient = (post.recipient ?? "").trim().toLowerCase();
@@ -765,7 +765,16 @@ export function extractRecipientName(
     }
   }
 
-  // 2. LinkedIn post author slug (e.g. /posts/preeti-nagpal-910589411_hiring-...)
+  // 2. Explicit author name (extracted from LinkedIn JSON-LD or mobile screenshot)
+  if (post.author_name) {
+    const authorTokens = post.author_name.trim().split(/\s+/).filter(Boolean);
+    if (authorTokens.length > 0) {
+      const first = cleanNameToken(authorTokens[0]);
+      if (first) return first;
+    }
+  }
+
+  // 3. LinkedIn post author slug (e.g. /posts/preeti-nagpal-910589411_hiring-...)
   if (post.url) {
     try {
       const parsed = new URL(post.url);
