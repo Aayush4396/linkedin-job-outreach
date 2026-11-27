@@ -1,16 +1,10 @@
 node_modules/
 dist/
+data/
 .playwright-cli/
 .env
 .env.local
 .env.*.local
 *.log
-data/
-.local-deps/
-__pycache__/
-*.py[cod]
-*.sqlite3*
-.venv/
 *.pem
 *.key
-

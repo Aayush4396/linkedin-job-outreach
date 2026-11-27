@@ -11,6 +11,7 @@ ENV NODE_ENV=production PORT=8080
 COPY --from=builder /app/package.json /app/package-lock.json* ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/browser ./browser
 COPY --from=builder /app/server ./server
 COPY --from=builder /app/server.ts ./server.ts
 COPY --from=builder /app/src/lib ./src/lib

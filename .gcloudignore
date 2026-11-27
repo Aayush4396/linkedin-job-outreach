@@ -1,8 +1,9 @@
 .git/
+node_modules/
+dist/
+data/
+.playwright-cli/
 .env
 .env.*
-*.sqlite3*
-data/
-.venv/
-.local-deps/
-**/__pycache__/
+!.env.example
+*.log

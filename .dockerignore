@@ -1,6 +1,9 @@
-*
-!app/
-!app/**
-!requirements.txt
-!Dockerfile
-**/__pycache__/
+node_modules/
+dist/
+data/
+.git/
+.playwright-cli/
+.env
+.env.*
+!.env.example
+*.log

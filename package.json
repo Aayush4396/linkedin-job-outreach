@@ -9,7 +9,7 @@
     "start": "tsx server.ts",
     "lint": "eslint src server server.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/lib/postDiscovery.test.ts"
+    "test": "tsx --test src/lib/postDiscovery.test.ts server/emlBuilder.test.ts server/linkedinFetcher.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.30.0",
